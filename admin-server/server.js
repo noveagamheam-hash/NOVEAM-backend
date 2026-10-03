@@ -1,16 +1,30 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
+import cors from 'cors';
 import {initializeApp,applicationDefault} from 'firebase-admin/app';
 import {getAuth} from 'firebase-admin/auth';
 import {getFirestore} from 'firebase-admin/firestore';
-import {fileURLToPath} from 'node:url';
 import {summarize} from './metrics.js';
 const admins=new Set((process.env.ADMIN_UIDS||'').split(',').map(s=>s.trim()).filter(Boolean));
 if(!admins.size)throw Error('Set ADMIN_UIDS before starting. Access is closed by default.');
 initializeApp({credential:applicationDefault(),projectId:process.env.FIREBASE_PROJECT_ID});
 const db=getFirestore(),auth=getAuth(),app=express();
+app.use(cors({
+  origin: [
+    'https://noveam.in',
+    'https://www.noveam.in'
+  ],
+  methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.disable('x-powered-by');
 app.use(express.json({limit:'12kb'}));
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'NOVEAM Admin Server'
+  });
+});
 app.use('/api/insights',rateLimit({windowMs:60000,limit:180}));
 app.use('/api/insights',async(req,res,next)=>{try{const token=req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];if(!token)return res.status(401).json({error:'Sign in required'});req.user=await auth.verifyIdToken(token,true);next();}catch{res.status(401).json({error:'Session expired or invalid'});}});
 app.use('/api/insights/admin',(req,res,next)=>{res.set('Cache-Control','no-store');if(!admins.has(req.user.uid))return res.status(403).json({error:'Admin access required'});next();});
@@ -19,6 +33,9 @@ app.post('/api/insights/event',async(req,res)=>{const b=req.body;if(!['pageview'
 app.post('/api/insights/feedback',rateLimit({windowMs:3600000,limit:10}),async(req,res)=>{const b=req.body;if(!['Bug','Suggestion','Feature request','General'].includes(b.category)||!Number.isInteger(b.rating)||b.rating<1||b.rating>5||typeof b.message!=='string'||b.message.trim().length<5||b.message.length>2000)return res.status(400).json({error:'Choose a category, rating and a message of 5–2000 characters.'});await db.collection('noveamFeedback').add({uid:req.user.uid,category:b.category,rating:b.rating,message:b.message.trim(),page:clean(b.page,150).split('?')[0],status:'New',at:Date.now()});res.status(201).json({ok:true});});
 app.get('/api/insights/admin/overview',async(req,res)=>{const since=Date.now()-30*86400000;const [ev,fb]=await Promise.all([db.collection('noveamEvents').where('at','>=',since).get(),db.collection('noveamFeedback').orderBy('at','desc').limit(500).get()]);let count=0,token;do{const batch=await auth.listUsers(1000,token);count+=batch.users.length;token=batch.pageToken;}while(token);res.json({registeredUsers:count,...summarize(ev.docs.map(d=>d.data())),feedback:fb.docs.map(d=>({id:d.id,...d.data()})),updatedAt:Date.now()});});
 app.patch('/api/insights/admin/feedback/:id',async(req,res)=>{if(!['New','Reviewing','Planned','Resolved'].includes(req.body.status))return res.status(400).json({error:'Invalid status'});const ref=db.collection('noveamFeedback').doc(req.params.id);if(!(await ref.get()).exists)return res.sendStatus(404);await ref.update({status:req.body.status});res.json({ok:true});});
-app.use(express.static(fileURLToPath(new URL('../public',import.meta.url))));
 app.use((err,req,res,next)=>{console.error(err.code||err.name);res.status(500).json({error:'Service unavailable. Check backend configuration.'});});
-app.listen(Number(process.env.PORT||8080),'127.0.0.1',()=>console.log('NOVEAM insights: http://127.0.0.1:8080/admin.html'));
+const PORT = Number(process.env.PORT || 8080);
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`NOVEAM Admin Server running on port ${PORT}`);
+});
