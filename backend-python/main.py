@@ -16,6 +16,8 @@ import secrets
 import sqlite3
 import uuid
 from pathlib import Path
+import firebase_admin
+from firebase_admin import credentials, firestore
 
 try:
     from livekit import api as livekit_api
@@ -25,6 +27,37 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("NOVEAGAMHEAM_DB_PATH", str(BASE_DIR / "noveagamheam.db")))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+# ---------------------------------------------------------
+# Firebase / Firestore
+# ---------------------------------------------------------
+
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "").strip()
+FIREBASE_CLIENT_EMAIL = os.environ.get("FIREBASE_CLIENT_EMAIL", "").strip()
+FIREBASE_PRIVATE_KEY = os.environ.get("FIREBASE_PRIVATE_KEY", "").replace("\\n", "\n").strip()
+
+firestore_db = None
+
+if FIREBASE_PROJECT_ID and FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY:
+    try:
+        firebase_credentials = credentials.Certificate({
+            "type": "service_account",
+            "project_id": FIREBASE_PROJECT_ID,
+            "client_email": FIREBASE_CLIENT_EMAIL,
+            "private_key": FIREBASE_PRIVATE_KEY,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        })
+
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(firebase_credentials)
+
+        firestore_db = firestore.client()
+
+        print("Firebase Firestore initialized successfully")
+
+    except Exception as e:
+        print("Firebase initialization failed:", str(e))
+else:
+    print("Firebase environment variables are not configured")
 
 # Serve the existing frontend and REST API from the same FastAPI application.
 # Normal source layout:
