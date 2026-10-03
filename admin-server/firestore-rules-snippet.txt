@@ -1,0 +1,5 @@
+// Merge these into your existing rules. Remove any broader overlapping rule
+// that grants access to these paths; Firestore allow rules are additive.
+match /noveamEvents/{document} { allow read, write: if false; }
+match /noveamFeedback/{document} { allow read, write: if false; }
+// Enable TTL on noveamEvents.expiresAt in Firebase/Google Cloud console.
