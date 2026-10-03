@@ -1,0 +1,25 @@
+# Node
+node_modules/
+
+# Environment secrets
+.env
+.env.*
+
+# Firebase Admin credentials
+firebase-service-account*.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# NOVEAM private/runtime data
+uploads/
+backups/
+
+# Logs
+*.log
