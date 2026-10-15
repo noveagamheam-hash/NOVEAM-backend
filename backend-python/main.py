@@ -154,9 +154,58 @@ def require_permission(user, permission: str):
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    print("\n========== NOVEAM SQLITE DATABASE DEBUG ==========", flush=True)
+    print(f"Database Path: {DB_PATH}", flush=True)
+
+    try:
+        # Step 1: Connect to SQLite database
+        print("[STEP 1] Connecting to SQLite database...", flush=True)
+
+        conn = sqlite3.connect(DB_PATH)
+
+        print("[SUCCESS] SQLite database connection established.", flush=True)
+
+        # Step 2: Configure row factory
+        print("[STEP 2] Configuring SQLite row_factory...", flush=True)
+
+        conn.row_factory = sqlite3.Row
+
+        if conn.row_factory is sqlite3.Row:
+            print("[SUCCESS] sqlite3.Row factory configured successfully.", flush=True)
+        else:
+            print("[WARNING] sqlite3.Row factory configuration failed.", flush=True)
+
+        # Step 3: Test database connection
+        print("[STEP 3] Testing SQLite database query...", flush=True)
+
+        cursor = conn.execute("SELECT sqlite_version()")
+        result = cursor.fetchone()
+
+        print(f"[SUCCESS] SQLite Version: {result[0]}", flush=True)
+        print("[SUCCESS] SQLite database query executed.", flush=True)
+
+        # Step 4: Display connected database
+        print("[STEP 4] Checking connected database...", flush=True)
+
+        cursor = conn.execute("PRAGMA database_list")
+        databases = cursor.fetchall()
+
+        for database in databases:
+            print(f"Database Name: {database[1]}", flush=True)
+            print(f"Database File: {database[2]}", flush=True)
+
+        print("========== DATABASE CONNECTION SUCCESS ==========\n", flush=True)
+
+        return conn
+
+    except Exception as e:
+        print(f"[ERROR] SQLite database connection failed: {e}", flush=True)
+        print("========== DATABASE CONNECTION FAILED ==========\n", flush=True)
+
+        if 'conn' in locals():
+            conn.close()
+
+        raise
 
 
 def init_db():
