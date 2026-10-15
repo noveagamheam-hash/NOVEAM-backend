@@ -321,13 +321,44 @@ def public_user(row):
 
 def create_session(user_id: int) -> str:
     token = secrets.token_urlsafe(40)
-    expires = datetime.now(timezone.utc) + timedelta(days=7)
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=7)
+
+    # Print session information before database insertion
+    print("\n========== NOVEAM SESSION DEBUG ==========", flush=True)
+    print(f"User ID       : {user_id}", flush=True)
+    print(f"Session Token : {token[:8]}... [MASKED]", flush=True)
+    print(f"Created At    : {now.isoformat()}", flush=True)
+    print(f"Expires At    : {expires.isoformat()}", flush=True)
+    print("==========================================\n", flush=True)
+
     with db() as conn:
-        conn.execute("DELETE FROM sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
+
+        # Delete expired sessions
+        conn.execute(
+            "DELETE FROM sessions WHERE expires_at < ?",
+            (now.isoformat(),)
+        )
+
+        print("Expired sessions cleanup completed.", flush=True)
+
+        # Print before inserting into SQLite
+        print("Inserting session into SQLite database...", flush=True)
+
         conn.execute(
             "INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
-            (token, user_id, expires.isoformat(), datetime.now(timezone.utc).isoformat()),
+            (
+                token,
+                user_id,
+                expires.isoformat(),
+                now.isoformat()
+            ),
         )
+
+        print(f"Session INSERT executed for User ID: {user_id}", flush=True)
+
+    print("Session database transaction completed.", flush=True)
+
     return token
 
 
