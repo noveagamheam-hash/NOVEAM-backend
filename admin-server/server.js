@@ -8,8 +8,12 @@ import {summarize} from './metrics.js';
 const admins=new Set((process.env.ADMIN_UIDS||'').split(',').map(s=>s.trim()).filter(Boolean));
 if(!admins.size)throw Error('Set ADMIN_UIDS before starting. Access is closed by default.');
 initializeApp({credential:applicationDefault(),projectId:process.env.FIREBASE_PROJECT_ID});
-const db=getFirestore(),auth=getAuth(),app=express();
-// Trust one reverse proxy hop
+// Connect to the named NOVEAM Firestore database
+const db = getFirestore('noveagamheam');
+const auth = getAuth();
+const app = express();
+
+// Trust Render reverse proxy
 app.set('trust proxy', 1);
 app.use(cors({
   origin: [
