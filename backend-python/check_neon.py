@@ -1,16 +1,10 @@
-
-"""
-NOVEAM Neon PostgreSQL connection check.
-
-Read-only connection and version check.
-Does not create, update, or delete tables.
-"""
-
+# check_neon.py
 import logging
-import os
 import sys
 
 import psycopg
+
+from neon_db import test_neon_connection
 
 
 logging.basicConfig(
@@ -22,43 +16,15 @@ logger = logging.getLogger("noveam.neon")
 
 
 def check_neon():
-    database_url = os.getenv("DATABASE_URL")
-
-    if not database_url:
-        logger.error("DATABASE_URL is not configured")
-        return False
-
     try:
-        with psycopg.connect(
-            database_url,
-            connect_timeout=10,
-            autocommit=True
-        ) as conn:
+        result = test_neon_connection()
 
-            with conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT current_database(), "
-                    "current_user, version()"
-                )
-
-                database, user, version = cursor.fetchone()
-
-                logger.info(
-                    "Neon connection successful"
-                )
-
-                logger.info(
-                    "Database connection verified"
-                )
-
-                logger.info(
-                    "PostgreSQL version: %s",
-                    version.split()[1]
-                )
+        logger.info("Neon connection successful")
+        logger.info("Database: %s", result[0])
 
         return True
 
-    except psycopg.Error as exc:
+    except (psycopg.Error, OSError, KeyError) as exc:
         logger.error(
             "Neon connection failed: %s",
             type(exc).__name__
