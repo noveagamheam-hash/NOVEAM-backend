@@ -25,4 +25,38 @@ app.get('/api/insights/admin/geography',async(req,res,next)=>{
     // Only aggregated non-identifying statistics from the trusted FastAPI service.
     res.json(result);
   }catch(err){next(err);}
+  
+app.get(
+  '/api/insights/admin/registration-sources',
+  async (req, res) => {
+    const result = {
+      sqlite: { normalUsers: null },
+      postgresql: { normalUsers: null },
+      firebase: { adminUsers: null }
+    };
+
+    let firebaseCount = 0;
+    for (const uid of admins) {
+      try {
+        await auth.getUser(uid);
+        firebaseCount++;
+      } catch (error) {
+        if (error.code !== 'auth/user-not-found') {
+          console.error('Firebase count failed', error);
+          firebaseCount = null;
+          break;
+        }
+      }
+    }
+
+    result.firebase.adminUsers = firebaseCount;
+
+    // SQLite and PostgreSQL counts must come from
+    // authenticated backend database-statistics APIs.
+    // Null means unavailable, never zero by assumption.
+
+    res.json(result);
+  }
+);
+
 });
