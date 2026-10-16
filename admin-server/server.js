@@ -9,6 +9,8 @@ const admins=new Set((process.env.ADMIN_UIDS||'').split(',').map(s=>s.trim()).fi
 if(!admins.size)throw Error('Set ADMIN_UIDS before starting. Access is closed by default.');
 initializeApp({credential:applicationDefault(),projectId:process.env.FIREBASE_PROJECT_ID});
 const db=getFirestore(),auth=getAuth(),app=express();
+// Trust one reverse proxy hop
+app.set('trust proxy', 1);
 app.use(cors({
   origin: [
     'https://noveam.in',
@@ -33,7 +35,20 @@ app.post('/api/insights/event',async(req,res)=>{const b=req.body;if(!['pageview'
 app.post('/api/insights/feedback',rateLimit({windowMs:3600000,limit:10}),async(req,res)=>{const b=req.body;if(!['Bug','Suggestion','Feature request','General'].includes(b.category)||!Number.isInteger(b.rating)||b.rating<1||b.rating>5||typeof b.message!=='string'||b.message.trim().length<5||b.message.length>2000)return res.status(400).json({error:'Choose a category, rating and a message of 5–2000 characters.'});await db.collection('noveamFeedback').add({uid:req.user.uid,category:b.category,rating:b.rating,message:b.message.trim(),page:clean(b.page,150).split('?')[0],status:'New',at:Date.now()});res.status(201).json({ok:true});});
 app.get('/api/insights/admin/overview',async(req,res)=>{const since=Date.now()-30*86400000;const [ev,fb]=await Promise.all([db.collection('noveamEvents').where('at','>=',since).get(),db.collection('noveamFeedback').orderBy('at','desc').limit(500).get()]);let count=0,token;do{const batch=await auth.listUsers(1000,token);count+=batch.users.length;token=batch.pageToken;}while(token);res.json({registeredUsers:count,...summarize(ev.docs.map(d=>d.data())),feedback:fb.docs.map(d=>({id:d.id,...d.data()})),updatedAt:Date.now()});});
 app.patch('/api/insights/admin/feedback/:id',async(req,res)=>{if(!['New','Reviewing','Planned','Resolved'].includes(req.body.status))return res.status(400).json({error:'Invalid status'});const ref=db.collection('noveamFeedback').doc(req.params.id);if(!(await ref.get()).exists)return res.sendStatus(404);await ref.update({status:req.body.status});res.json({ok:true});});
-app.use((err,req,res,next)=>{console.error(err.code||err.name);res.status(500).json({error:'Service unavailable. Check backend configuration.'});});
+app.use((err, req, res, next) => {
+  console.error('NOVEAM Admin API error:', {
+    method: req.method,
+    path: req.path,
+    code: err.code,
+    name: err.name,
+    message: err.message,
+    stack: err.stack
+  });
+
+  res.status(500).json({
+    error: 'Service unavailable. Check backend configuration.'
+  });
+});
 const PORT = Number(process.env.PORT || 8080);
 
 app.listen(PORT, '0.0.0.0', () => {
