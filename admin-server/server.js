@@ -1,60 +1,28 @@
-import express from 'express';
-import rateLimit from 'express-rate-limit';
-import cors from 'cors';
-import {initializeApp,applicationDefault} from 'firebase-admin/app';
-import {getAuth} from 'firebase-admin/auth';
-import {getFirestore} from 'firebase-admin/firestore';
-import {summarize} from './metrics.js';
-const admins=new Set((process.env.ADMIN_UIDS||'').split(',').map(s=>s.trim()).filter(Boolean));
-if(!admins.size)throw Error('Set ADMIN_UIDS before starting. Access is closed by default.');
-initializeApp({credential:applicationDefault(),projectId:process.env.FIREBASE_PROJECT_ID});
-// Connect to the named NOVEAM Firestore database
-const db = getFirestore('noveagamheam');
-const auth = getAuth();
-const app = express();
-
-// Trust Render reverse proxy
-app.set('trust proxy', 1);
-app.use(cors({
-  origin: [
-    'https://noveam.in',
-    'https://www.noveam.in'
-  ],
-  methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-app.disable('x-powered-by');
-app.use(express.json({limit:'12kb'}));
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'NOVEAM Admin Server'
-  });
+// ADD to existing server.js AFTER the admin authorization middleware and BEFORE error handler.
+// Do NOT replace your existing server.js. Existing auth, ADMIN_UIDS, Firestore and routes remain intact.
+// User directory: read-only, paginated, and protected by existing Firebase UID admin check.
+app.get('/api/insights/admin/users', async (req,res,next)=>{
+  try {
+    const limit=Math.min(100,Math.max(1,Number.parseInt(req.query.limit,10)||50));
+    const pageToken=typeof req.query.pageToken==='string'&&req.query.pageToken.length<=2048?req.query.pageToken:undefined;
+    const result=await auth.listUsers(limit,pageToken);
+    res.json({users:result.users.map(u=>({uid:u.uid,email:u.email||null,displayName:u.displayName||null,disabled:u.disabled,role:admins.has(u.uid)?'Administrator':'Normal User',createdAt:u.metadata.creationTime||null})),nextPageToken:result.pageToken||null});
+  }catch(err){next(err);}
 });
-app.use('/api/insights',rateLimit({windowMs:60000,limit:180}));
-app.use('/api/insights',async(req,res,next)=>{try{const token=req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];if(!token)return res.status(401).json({error:'Sign in required'});req.user=await auth.verifyIdToken(token,true);next();}catch{res.status(401).json({error:'Session expired or invalid'});}});
-app.use('/api/insights/admin',(req,res,next)=>{res.set('Cache-Control','no-store');if(!admins.has(req.user.uid))return res.status(403).json({error:'Admin access required'});next();});
-const clean=(v,n)=>typeof v==='string'?v.slice(0,n):'';
-app.post('/api/insights/event',async(req,res)=>{const b=req.body;if(!['pageview','heartbeat','feature'].includes(b.type)||!/^[-\w]{8,80}$/.test(b.session||''))return res.status(400).json({error:'Invalid event'});const at=Date.now();await db.collection('noveamEvents').add({uid:req.user.uid,type:b.type,session:b.session,page:clean(b.page,150).split('?')[0],at,day:new Date(at).toISOString().slice(0,10),expiresAt:new Date(at+35*86400000)});res.sendStatus(204);});
-app.post('/api/insights/feedback',rateLimit({windowMs:3600000,limit:10}),async(req,res)=>{const b=req.body;if(!['Bug','Suggestion','Feature request','General'].includes(b.category)||!Number.isInteger(b.rating)||b.rating<1||b.rating>5||typeof b.message!=='string'||b.message.trim().length<5||b.message.length>2000)return res.status(400).json({error:'Choose a category, rating and a message of 5–2000 characters.'});await db.collection('noveamFeedback').add({uid:req.user.uid,category:b.category,rating:b.rating,message:b.message.trim(),page:clean(b.page,150).split('?')[0],status:'New',at:Date.now()});res.status(201).json({ok:true});});
-app.get('/api/insights/admin/overview',async(req,res)=>{const since=Date.now()-30*86400000;const [ev,fb]=await Promise.all([db.collection('noveamEvents').where('at','>=',since).get(),db.collection('noveamFeedback').orderBy('at','desc').limit(500).get()]);let count=0,token;do{const batch=await auth.listUsers(1000,token);count+=batch.users.length;token=batch.pageToken;}while(token);res.json({registeredUsers:count,...summarize(ev.docs.map(d=>d.data())),feedback:fb.docs.map(d=>({id:d.id,...d.data()})),updatedAt:Date.now()});});
-app.patch('/api/insights/admin/feedback/:id',async(req,res)=>{if(!['New','Reviewing','Planned','Resolved'].includes(req.body.status))return res.status(400).json({error:'Invalid status'});const ref=db.collection('noveamFeedback').doc(req.params.id);if(!(await ref.get()).exists)return res.sendStatus(404);await ref.update({status:req.body.status});res.json({ok:true});});
-app.use((err, req, res, next) => {
-  console.error('NOVEAM Admin API error:', {
-    method: req.method,
-    path: req.path,
-    code: err.code,
-    name: err.name,
-    message: err.message,
-    stack: err.stack
-  });
-
-  res.status(500).json({
-    error: 'Service unavailable. Check backend configuration.'
-  });
-});
-const PORT = Number(process.env.PORT || 8080);
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`NOVEAM Admin Server running on port ${PORT}`);
+// Geo aggregates must come from FastAPI's *private*, admin-authorized aggregate endpoint.
+// Never send user IP addresses or DB credentials to browsers. Fail closed when unconfigured.
+app.get('/api/insights/admin/geography',async(req,res,next)=>{
+  try {
+    const base=(process.env.NOVEAM_GEO_INTERNAL_URL||'').replace(/\/$/,'');
+    const secret=process.env.NOVEAM_GEO_SERVICE_TOKEN||'';
+    if(!base||!secret)return res.status(503).json({error:'Geographic analytics not configured'});
+    const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),5000);
+    let upstream;
+    try{upstream=await fetch(base+'/internal/admin/geography',{headers:{Authorization:'Bearer '+secret},signal:controller.signal});}
+    finally{clearTimeout(timer);}
+    if(!upstream.ok)return res.status(502).json({error:'Geographic analytics service unavailable'});
+    const result=await upstream.json();
+    // Only aggregated non-identifying statistics from the trusted FastAPI service.
+    res.json(result);
+  }catch(err){next(err);}
 });
