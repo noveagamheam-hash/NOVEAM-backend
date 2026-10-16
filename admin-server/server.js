@@ -540,6 +540,126 @@ app.get(
     }
   }
 );
+/* NOVEAM — Additional Admin Analytics
+   Add before the centralized error handler.
+   Read-only: no database modifications.
+*/
+
+app.get('/api/insights/admin/analytics-summary', async (req, res) => {
+  const result = {
+    updatedAt: Date.now(),
+    users: {
+      registered: null,
+      newLast7Days: null,
+      disabled: null,
+      administrators: null
+    },
+    engagement: {
+      dau: null,
+      wau: null,
+      mau: null,
+      sessions: null,
+      activeNow: null,
+      mostVisitedPages: [],
+      daily: []
+    },
+    feedback: {
+      total: null,
+      new: null,
+      reviewing: null,
+      planned: null,
+      resolved: null
+    },
+    sources: {
+      firebase: 'unavailable',
+      firestore: 'unavailable',
+      sqlite: 'unavailable',
+      postgresql: 'unavailable'
+    },
+    futureFeatures: {
+      ai: 'not_enabled',
+      web3: 'not_enabled',
+      monetization: 'not_enabled'
+    }
+  };
+
+  // Firebase user statistics
+  try {
+    const allUsers = [];
+    let token;
+
+    do {
+      const batch = await auth.listUsers(1000, token);
+      allUsers.push(...batch.users);
+      token = batch.pageToken;
+    } while (token);
+
+    const weekAgo = Date.now() - 7 * 86400000;
+
+    result.users.registered = allUsers.length;
+    result.users.disabled =
+      allUsers.filter(u => u.disabled).length;
+    result.users.administrators =
+      allUsers.filter(u => admins.has(u.uid)).length;
+    result.users.newLast7Days =
+      allUsers.filter(u =>
+        Date.parse(u.metadata.creationTime) >= weekAgo
+      ).length;
+
+    result.sources.firebase = 'available';
+  } catch (err) {
+    console.error('Firebase analytics:', err.message);
+  }
+
+  // Firestore engagement and feedback
+  try {
+    const since = Date.now() - 30 * 86400000;
+
+    const [events, feedback] = await Promise.all([
+      db.collection('noveamEvents')
+        .where('at', '>=', since).get(),
+      db.collection('noveamFeedback')
+        .limit(500).get()
+    ]);
+
+    const metrics = summarize(
+      events.docs.map(d => d.data())
+    );
+
+    Object.assign(result.engagement, {
+      dau: metrics.dau,
+      wau: metrics.wau,
+      mau: metrics.mau,
+      sessions: metrics.sessions,
+      activeNow: metrics.activeNow,
+      mostVisitedPages: metrics.pages,
+      daily: metrics.daily
+    });
+
+    const items = feedback.docs.map(d => d.data());
+
+    result.feedback = {
+      total: items.length,
+      new: items.filter(x => x.status === 'New').length,
+      reviewing: items.filter(
+        x => x.status === 'Reviewing'
+      ).length,
+      planned: items.filter(
+        x => x.status === 'Planned'
+      ).length,
+      resolved: items.filter(
+        x => x.status === 'Resolved'
+      ).length
+    };
+
+    result.sources.firestore = 'available';
+  } catch (err) {
+    console.error('Firestore analytics:', err.message);
+  }
+
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
+});
 
 // ===================================================
 // CENTRALIZED ERROR HANDLER
