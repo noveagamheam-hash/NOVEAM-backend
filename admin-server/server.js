@@ -322,22 +322,29 @@ app.get(
         pageToken
       );
 
-      res.json({
-        users: result.users.map(u => ({
-          emailVerified: u.emailVerified,
-providers: u.providerData.map(p => p.providerId),
-          uid: u.uid,
-          email: u.email || null,
-          displayName: u.displayName || null,
-          disabled: u.disabled,
-          role: admins.has(u.uid)
-            ? 'Administrator'
-            : 'Normal User',
-          createdAt: u.metadata.creationTime || null,
-          lastSignIn: u.metadata.lastSignInTime || null
-        })),
-        nextPageToken: result.pageToken || null
-      });
+      
+res.json({
+  users: result.users.map(u => ({
+    uid: u.uid,
+    email: u.email || null,
+    displayName: u.displayName || null,
+    disabled: u.disabled,
+
+    role: admins.has(u.uid)
+      ? 'Administrator'
+      : 'Normal User',
+
+    emailVerified: u.emailVerified,
+
+    providers: u.providerData.map(p => p.providerId),
+
+    createdAt: u.metadata.creationTime || null,
+    lastSignIn: u.metadata.lastSignInTime || null
+  })),
+
+  nextPageToken: result.pageToken || null
+});
+
 
     } catch (error) {
       next(error);
