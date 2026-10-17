@@ -10,7 +10,10 @@ import {
 
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
-import { summarize } from './metrics.js';
+import {
+  summarize,
+  summarizeDateRange
+} from './metrics.js';
 
 // ===================================================
 // NOVEAM ADMIN SERVER — CONFIGURATION
@@ -667,8 +670,11 @@ db.collection('noveamEvents')
         .limit(500).get()
     ]);
 
-    const metrics = summarize(
-      events.docs.map(d => d.data())
+    const metrics = summarizeDateRange(
+  events.docs.map(d => d.data()),
+  startDate,
+  endDate
+);
     );
 
     Object.assign(result.engagement, {
