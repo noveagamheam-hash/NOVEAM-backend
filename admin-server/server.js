@@ -280,15 +280,6 @@ app.post(
         });
       }
 
-      await db.collection('noveamFeedback').add({
-        uid: req.user.uid,
-        category: b.category,
-        rating: b.rating,
-        message: b.message.trim(),
-        page: clean(b.page, 150).split('?')[0],
-        status: 'New',
-        at: Date.now()
-      });
 let details;
 
 try {
