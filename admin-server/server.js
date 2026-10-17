@@ -675,7 +675,7 @@ db.collection('noveamEvents')
   startDate,
   endDate
 );
-    );
+    
 
     Object.assign(result.engagement, {
       dau: metrics.dau,
