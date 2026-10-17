@@ -214,9 +214,12 @@ function validateFeedbackDetails(body) {
     contactConsent: b.contactConsent === true
   };
 }
-// ===================================================
-// EXISTING EVENT TRACKING
-// ===================================================
+
+
+
+ // ===================================================
+ // EXISTING EVENT TRACKING
+ // ===================================================
 
 app.post('/api/insights/event', async (req, res, next) => {
   try {
@@ -243,8 +246,7 @@ app.post('/api/insights/event', async (req, res, next) => {
       expiresAt: new Date(at + 35 * 86400000)
     });
 
-    res.sendStatus(204);
-
+    return res.sendStatus(204);
   } catch (error) {
     next(error);
   }
@@ -262,64 +264,46 @@ app.post(
   }),
   async (req, res, next) => {
     try {
-      const b = req.body || {};
+      let details;
 
-      if (
-        !['Bug', 'Suggestion', 'Feature request', 'General']
-          .includes(b.category) ||
-        !Number.isInteger(b.rating) ||
-        b.rating < 1 ||
-        b.rating > 5 ||
-        typeof b.message !== 'string' ||
-        b.message.trim().length < 5 ||
-        b.message.length > 2000
-      ) {
+      try {
+        details = validateFeedbackDetails(req.body);
+      } catch (error) {
         return res.status(400).json({
-          error:
-            'Choose a category, rating and a message of 5–2000 characters.'
+          error: error.message
         });
       }
 
-let details;
+      const now = Date.now();
+      const ticketRef = db.collection('noveamFeedback').doc();
 
-try {
-  details = validateFeedbackDetails(req.body);
-} catch (error) {
-  return res.status(400).json({
-    error: error.message
-  });
-}
+      await ticketRef.set({
+        uid: req.user.uid,
+        ...details,
+        page: clean(req.body?.page, 150).split('?')[0],
+        status: 'New',
+        at: now,
+        updatedAt: now,
+        ticketId: ticketRef.id,
+        assignedTo: null,
+        adminReply: null,
+        callbackStatus:
+          details.contactRequest === 'none'
+            ? 'not_requested'
+            : 'pending_review'
+      });
 
-const now = Date.now();
-const ticketRef = db.collection('noveamFeedback').doc();
-
-await ticketRef.set({
-  uid: req.user.uid,
-  ...details,
-  page: clean(req.body.page, 150).split('?')[0],
-  status: 'New',
-  at: now,
-  updatedAt: now,
-  ticketId: ticketRef.id,
-  assignedTo: null,
-  adminReply: null,
-  callbackStatus:
-    details.contactRequest === 'none'
-      ? 'not_requested'
-      : 'pending_review'
-});
-
-return res.status(201).json({
-  ok: true,
-  ticketId: ticketRef.id
-});
-      res.status(201).json({ ok: true });
-
+      return res.status(201).json({
+        ok: true,
+        ticketId: ticketRef.id
+      });
     } catch (error) {
       next(error);
     }
   }
 );
+
+
 
 // ===================================================
 // EXISTING ADMIN OVERVIEW
