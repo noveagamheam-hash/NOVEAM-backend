@@ -685,7 +685,7 @@ db.collection('noveamEvents')
       activeNow: metrics.activeNow,
       mostVisitedPages: metrics.pages,
       daily: metrics.daily
-    });
+    })
 
     const items = feedback.docs.map(d => d.data());
 
