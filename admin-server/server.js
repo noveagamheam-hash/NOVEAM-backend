@@ -555,6 +555,39 @@ app.get(
 */
 
 app.get('/api/insights/admin/analytics-summary', async (req, res) => {
+  // Validate the selected analytics date range.
+  const today = new Date().toISOString().slice(0, 10);
+
+  const startDate = req.query.startDate;
+  const endDate = req.query.endDate;
+
+  const validDate = value => {
+    if (typeof value !== 'string' ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return false;
+    }
+
+    const parsed = new Date(value + 'T00:00:00.000Z');
+
+    return !Number.isNaN(parsed.getTime()) &&
+      parsed.toISOString().slice(0, 10) === value;
+  };
+
+  if (!validDate(startDate) ||
+      !validDate(endDate) ||
+      startDate > endDate ||
+      endDate > today) {
+    return res.status(400).json({
+      error: 'Select a valid date range ending today or earlier.'
+    });
+  }
+
+  const rangeStart =
+    Date.parse(startDate + 'T00:00:00.000Z');
+
+  const rangeEnd =
+    Date.parse(endDate + 'T00:00:00.000Z') + 86400000;
+
   const result = {
     updatedAt: Date.now(),
     users: {
@@ -622,11 +655,14 @@ app.get('/api/insights/admin/analytics-summary', async (req, res) => {
 
   // Firestore engagement and feedback
   try {
-    const since = Date.now() - 30 * 86400000;
-
+    
     const [events, feedback] = await Promise.all([
-      db.collection('noveamEvents')
-        .where('at', '>=', since).get(),
+     
+db.collection('noveamEvents')
+  .where('at', '>=', rangeStart)
+  .where('at', '<', rangeEnd)
+  .get(),
+
       db.collection('noveamFeedback')
         .limit(500).get()
     ]);
