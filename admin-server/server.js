@@ -90,6 +90,152 @@ app.use(
 // FIREBASE AUTHENTICATION
 // ===================================================
 
+
+const GUEST_CATEGORIES = new Set([
+  'Login and account',
+  'Registration',
+  'Bug',
+  'Suggestion',
+  'General'
+]);
+
+const guestFeedbackLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false
+});
+
+app.post(
+  '/api/insights/guest-feedback',
+  guestFeedbackLimiter,
+  async (req, res, next) => {
+    try {
+      const body = req.body || {};
+
+      const category = body.category;
+      const subject = clean(body.subject, 150).trim();
+      const message = clean(body.message, 2001).trim();
+      const device = clean(body.device, 150).trim();
+      const email = clean(body.email, 255).trim();
+      const captchaToken = body.captchaToken;
+
+      if (
+        !GUEST_CATEGORIES.has(category) ||
+        subject.length < 3 ||
+        message.length < 10 ||
+        message.length > 2000 ||
+        (email && (
+          !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+          email.length > 254
+        )) ||
+        (email && body.contactConsent !== true)
+      ) {
+        return res.status(400).json({
+          error: 'Please check your feedback details.'
+        });
+      }
+
+      if (
+        typeof captchaToken !== 'string' ||
+        !captchaToken ||
+        captchaToken.length > 2048
+      ) {
+        return res.status(400).json({
+          error: 'Security verification required.'
+        });
+      }
+
+      const secret = process.env.TURNSTILE_SECRET_KEY;
+
+      if (!secret) {
+        return res.status(503).json({
+          error: 'Guest feedback is not configured.'
+        });
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        5000
+      );
+
+      let verified = false;
+
+      try {
+        const verification = await fetch(
+          'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: new URLSearchParams({
+              secret,
+              response: captchaToken
+            }),
+            signal: controller.signal
+          }
+        );
+
+        if (!verification.ok) {
+          throw new Error('CAPTCHA verification unavailable');
+        }
+
+        const verificationResult = await verification.json();
+
+        verified =
+          verificationResult.success === true &&
+          verificationResult.hostname === 'noveam.in';
+
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (!verified) {
+        return res.status(400).json({
+          error: 'Security verification failed. Please retry.'
+        });
+      }
+
+      const now = Date.now();
+      const ticketRef = db.collection('noveamFeedback').doc();
+
+      await ticketRef.set({
+        uid: null,
+        accountType: 'Guest',
+        category,
+        subject,
+        message,
+        device,
+        email: email || null,
+        contactConsent: Boolean(email && body.contactConsent === true),
+        rating: null,
+        priority: 'Normal',
+        steps: [],
+        contactRequest: email ? 'support' : 'none',
+        callbackStatus: 'not_requested',
+        page: clean(body.page, 150).split('?')[0],
+        status: 'New',
+        at: now,
+        updatedAt: now,
+        ticketId: ticketRef.id,
+        assignedTo: null,
+        adminReply: null
+      });
+
+      return res.status(201).json({
+        ok: true,
+        ticketId: ticketRef.id
+      });
+
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+
 app.use('/api/insights', async (req, res, next) => {
   try {
     const token = req.headers.authorization
