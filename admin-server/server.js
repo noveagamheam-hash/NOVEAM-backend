@@ -131,7 +131,89 @@ const clean = (value, maxLength) =>
   typeof value === 'string'
     ? value.slice(0, maxLength)
     : '';
+const FEEDBACK_CATEGORIES = new Set([
+  'Bug',
+  'Suggestion',
+  'Feature request',
+  'General',
+  'Login and account',
+  'Performance',
+  'UI/UX',
+  'Accessibility',
+  'Security and privacy',
+  'Gaming',
+  'Payments',
+  'Other'
+]);
 
+const FEEDBACK_PRIORITIES = new Set([
+  'Low', 'Normal', 'High', 'Critical'
+]);
+
+const CONTACT_REQUESTS = new Set([
+  'none', 'support', 'director'
+]);
+
+function validateFeedbackDetails(body) {
+  const b = body || {};
+
+  const subject = clean(b.subject, 150).trim();
+  const device = clean(b.device, 150).trim();
+  const priority = b.priority ?? 'Normal';
+  const contactRequest = b.contactRequest ?? 'none';
+
+  if (
+    !FEEDBACK_CATEGORIES.has(b.category) ||
+    !Number.isInteger(b.rating) ||
+    b.rating < 1 ||
+    b.rating > 5 ||
+    typeof b.message !== 'string' ||
+    b.message.trim().length < 5 ||
+    b.message.length > 2000
+  ) {
+    throw new Error('Invalid feedback details');
+  }
+
+  if (!FEEDBACK_PRIORITIES.has(priority)) {
+    throw new Error('Invalid priority');
+  }
+
+  if (!CONTACT_REQUESTS.has(contactRequest)) {
+    throw new Error('Invalid contact request');
+  }
+
+  if (
+    b.steps !== undefined &&
+    (!Array.isArray(b.steps) ||
+      b.steps.length > 15 ||
+      b.steps.some(
+        step =>
+          typeof step !== 'string' ||
+          step.length > 500
+      ))
+  ) {
+    throw new Error('Invalid reproduction steps');
+  }
+
+  if (
+    contactRequest !== 'none' &&
+    b.contactConsent !== true
+  ) {
+    throw new Error('Contact consent required');
+  }
+
+  return {
+    category: b.category,
+    rating: b.rating,
+    message: b.message.trim(),
+    subject,
+    device,
+    priority,
+    steps: (b.steps || []).map(s => s.trim()),
+    contactRequest,
+    contactConsent: b.contactConsent === true
+  };
+}
 // ===================================================
 // EXISTING EVENT TRACKING
 // ===================================================
@@ -207,7 +289,39 @@ app.post(
         status: 'New',
         at: Date.now()
       });
+let details;
 
+try {
+  details = validateFeedbackDetails(req.body);
+} catch (error) {
+  return res.status(400).json({
+    error: error.message
+  });
+}
+
+const now = Date.now();
+const ticketRef = db.collection('noveamFeedback').doc();
+
+await ticketRef.set({
+  uid: req.user.uid,
+  ...details,
+  page: clean(req.body.page, 150).split('?')[0],
+  status: 'New',
+  at: now,
+  updatedAt: now,
+  ticketId: ticketRef.id,
+  assignedTo: null,
+  adminReply: null,
+  callbackStatus:
+    details.contactRequest === 'none'
+      ? 'not_requested'
+      : 'pending_review'
+});
+
+return res.status(201).json({
+  ok: true,
+  ticketId: ticketRef.id
+});
       res.status(201).json({ ok: true });
 
     } catch (error) {
