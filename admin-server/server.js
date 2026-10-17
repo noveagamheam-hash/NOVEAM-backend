@@ -324,6 +324,8 @@ app.get(
 
       res.json({
         users: result.users.map(u => ({
+          emailVerified: u.emailVerified,
+providers: u.providerData.map(p => p.providerId),
           uid: u.uid,
           email: u.email || null,
           displayName: u.displayName || null,
