@@ -2805,6 +2805,107 @@ def list_posts(authorization: Optional[str] = Header(default=None)):
     return {"posts": posts}
 
 
+@app.get("/api/posts/ranked")
+@logged_operation
+def list_ranked_posts(
+    authorization: Optional[str] = Header(default=None)
+):
+    # Authenticate before doing anything else.
+    viewer, _ = current_user(authorization)
+
+    # Select posts using existing NOVEAM privacy rules.
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM posts ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+
+    visible_rows = [
+        row for row in rows
+        if post_visible_to(row, viewer)
+    ]
+
+    posts = [
+        serialize_post(row, viewer)
+        for row in visible_rows
+    ]
+
+    # Keep the algorithm disabled until testing is approved.
+    if os.getenv("NOVEAM_RANKING_ENABLED", "false").lower() != "true":
+        return {"posts": posts}
+
+    if not posts:
+        return {"posts": []}
+
+    # Neutral signals until real personalization is implemented.
+    candidates = []
+
+    for row in visible_rows:
+        try:
+            created_at = datetime.fromisoformat(
+                row["created_at"].replace("Z", "+00:00")
+            ).timestamp()
+        except (ValueError, TypeError, AttributeError):
+            created_at = 0
+
+        candidates.append({
+            "id": str(row["id"]),
+            "author_id": str(row["author_user_id"]),
+            "created_at": created_at,
+            "interest": 0.5,
+            "relationship": 0.5,
+            "quality": 0.5,
+            "diversity": 0.5,
+            "followed": False,
+            "visible": True
+        })
+
+    url = os.getenv(
+        "NOVEAM_ALGORITHM_URL",
+        "https://noveam-algorithm.onrender.com"
+    ).rstrip("/") + "/api/ai/rank"
+
+    try:
+        response = httpx.post(
+            url,
+            json={
+                "posts": candidates,
+                "mode": "personalized",
+                "now": int(time.time())
+            },
+            timeout=5.0
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        results = data["results"]
+        allowed = {str(post["id"]): post for post in posts}
+
+        if not isinstance(results, list):
+            raise ValueError("Invalid ranking response")
+
+        ranked = []
+        seen = set()
+
+        for result in results:
+            post_id = str(result["id"])
+
+            if post_id in allowed and post_id not in seen:
+                ranked.append(allowed[post_id])
+                seen.add(post_id)
+
+        # Preserve eligible posts omitted by the algorithm.
+        ranked.extend(
+            post for post in posts
+            if str(post["id"]) not in seen
+        )
+
+        return {"posts": ranked}
+
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        # Algorithm failure must not break the existing feed.
+        logger.warning("NDI-A01 ranking unavailable; using original order")
+        return {"posts": posts}
+
 @app.get("/api/posts/{post_id}")
 @logged_operation
 def get_post(post_id: int, authorization: Optional[str] = Header(default=None)):
