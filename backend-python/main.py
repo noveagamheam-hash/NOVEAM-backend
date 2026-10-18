@@ -2225,6 +2225,30 @@ class BodyLimitMiddleware:
 
 
 app = FastAPI(title="Noveagamheam REST API", version="1.7.0", lifespan=lifespan)
+ # NOVEAM Step 5.5C — Analytics event validation
+# Disabled by default; no data is stored or forwarded.
+
+@app.post("/api/analytics/event")
+async def receive_noveam_analytics(
+    event: NoveamAnalyticsEvent,
+    authorization: Optional[str] = Header(default=None),
+):
+    if not _env_bool("NOVEAM_ANALYTICS_ENABLED"):
+        raise HTTPException(
+            status_code=503,
+            detail="Analytics collection is not enabled",
+        )
+
+    user, _ = await run_in_threadpool(
+        current_user,
+        authorization,
+    )
+
+    return {
+        "status": "validated",
+        "accepted": False,
+        "stored": False,
+    }   
 app.add_middleware(BodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
