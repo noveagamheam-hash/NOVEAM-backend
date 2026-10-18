@@ -48,8 +48,14 @@ export function summarizeDateRange(events, startDate, endDate) {
     Math.max(start, endExclusive - days * DAY);
 
   return {
-    // Unique users across the selected range
-    uniqueUsers: unique(filtered),
+  // Unique users across the selected range
+  uniqueUsers: unique(filtered),
+
+  // Users active within the last 2 minutes
+  activeNow: unique(filtered.filter(e =>
+    e.at >= Date.now() - 120000 &&
+    e.at <= Date.now()
+  )),
 
     // Activity on the final selected day
     dau: unique(filtered.filter(e => e.at >= end)),
