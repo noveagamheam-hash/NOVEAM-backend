@@ -362,7 +362,33 @@ function validateFeedbackDetails(body) {
 }
 
 
+// NOVEAM STEP 5 — DEVICE AND REFERRAL CATEGORIES
 
+const DEVICE_TYPES = new Set([
+  'mobile', 'desktop', 'tablet', 'unknown'
+]);
+
+const BROWSERS = new Set([
+  'chrome', 'safari', 'firefox', 'edge',
+  'samsung-internet', 'opera', 'other', 'unknown'
+]);
+
+const OPERATING_SYSTEMS = new Set([
+  'android', 'ios', 'windows', 'macos',
+  'linux', 'chromeos', 'other', 'unknown'
+]);
+
+const TRAFFIC_SOURCES = new Set([
+  'google', 'bing', 'yahoo', 'duckduckgo',
+  'brave', 'other-search', 'social',
+  'referral', 'direct', 'unknown'
+]);
+
+function safeCategory(value, allowed) {
+  return typeof value === 'string' && allowed.has(value)
+    ? value
+    : 'unknown';
+}
  // ===================================================
  // EXISTING EVENT TRACKING
  // ===================================================
@@ -386,8 +412,20 @@ app.post('/api/insights/event', async (req, res, next) => {
       uid: req.user.uid,
       type: b.type,
       session: b.session,
-      page: clean(b.page, 150).split('?')[0],
-      at,
+    page: clean(b.page, 150).split('?')[0],
+
+deviceType: safeCategory(b.deviceType, DEVICE_TYPES),
+browser: safeCategory(b.browser, BROWSERS),
+operatingSystem: safeCategory(
+  b.operatingSystem,
+  OPERATING_SYSTEMS
+),
+trafficSource: safeCategory(
+  b.trafficSource,
+  TRAFFIC_SOURCES
+),
+
+at,
       day: new Date(at).toISOString().slice(0, 10),
       expiresAt: new Date(at + 35 * 86400000)
     });
