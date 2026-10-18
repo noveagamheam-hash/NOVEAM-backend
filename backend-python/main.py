@@ -629,7 +629,33 @@ class RegisterRequest(NoveamModel):
     role: str
     password: str = Field(min_length=8, max_length=128)
 
+# NOVEAM Step 5.5B — Analytics event validation
 
+class NoveamAnalyticsEvent(NoveamModel):
+    type: str = Field(pattern="^(pageview)$")
+    session: str = Field(
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$"
+    )
+    page: str = Field(max_length=150)
+
+    deviceType: str = Field(
+        default="unknown",
+        pattern="^(mobile|desktop|tablet|unknown)$"
+    )
+    browser: str = Field(
+        default="unknown",
+        pattern="^(chrome|safari|firefox|edge|samsung-internet|opera|other|unknown)$"
+    )
+    operatingSystem: str = Field(
+        default="unknown",
+        pattern="^(android|ios|windows|macos|linux|chromeos|other|unknown)$"
+    )
+    trafficSource: str = Field(
+        default="unknown",
+        pattern="^(google|bing|yahoo|duckduckgo|brave|other-search|social|referral|direct|unknown)$"
+    )
 class LoginRequest(NoveamModel):
     username: str = Field(default="", max_length=254)
     identifier: str = Field(default="", max_length=254)
