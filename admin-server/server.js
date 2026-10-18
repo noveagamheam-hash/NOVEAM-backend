@@ -393,6 +393,86 @@ function safeCategory(value, allowed) {
  // EXISTING EVENT TRACKING
  // ===================================================
 
+// ===================================================
+// NOVEAM STEP 5.5H — PRIVATE FASTAPI ANALYTICS
+// ===================================================
+
+// Disabled until explicitly enabled in Render.
+// Requires a separate secret shared by the two backends.
+
+app.post('/internal/analytics/event', async (req, res, next) => {
+  try {
+    if (process.env.NOVEAM_INTERNAL_ANALYTICS_ENABLED !== 'true') {
+      return res.status(503).json({
+        error: 'Internal analytics disabled'
+      });
+    }
+
+    const expectedToken = process.env.NOVEAM_ANALYTICS_SERVICE_TOKEN;
+
+    if (!expectedToken || expectedToken.length < 32) {
+      return res.status(503).json({
+        error: 'Internal analytics not configured'
+      });
+    }
+
+    const { timingSafeEqual } = await import('node:crypto');
+
+    const suppliedToken = req.headers.authorization
+      ?.match(/^Bearer (.+)$/)?.[1] || '';
+
+    const supplied = Buffer.from(suppliedToken);
+    const expected = Buffer.from(expectedToken);
+
+    if (
+      supplied.length !== expected.length ||
+      !timingSafeEqual(supplied, expected)
+    ) {
+      return res.status(401).json({
+        error: 'Unauthorized'
+      });
+    }
+
+    const b = req.body || {};
+
+    if (
+      !['pageview', 'heartbeat', 'feature'].includes(b.type) ||
+      typeof b.session !== 'string' ||
+      !/^[-\w]{8,80}$/.test(b.session)
+    ) {
+      return res.status(400).json({
+        error: 'Invalid analytics event'
+      });
+    }
+
+    const at = Date.now();
+
+    await db.collection('noveamEvents').add({
+      uid: null,
+      type: b.type,
+      session: b.session,
+      page: clean(b.page, 150).split('?')[0],
+      deviceType: safeCategory(b.deviceType, DEVICE_TYPES),
+      browser: safeCategory(b.browser, BROWSERS),
+      operatingSystem: safeCategory(
+        b.operatingSystem,
+        OPERATING_SYSTEMS
+      ),
+      trafficSource: safeCategory(
+        b.trafficSource,
+        TRAFFIC_SOURCES
+      ),
+      at,
+      day: new Date(at).toISOString().slice(0, 10),
+      expiresAt: new Date(at + 35 * 86400000)
+    });
+
+    return res.sendStatus(204);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/insights/event', async (req, res, next) => {
   try {
     const b = req.body || {};
