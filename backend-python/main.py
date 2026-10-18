@@ -2633,6 +2633,167 @@ def upload_post_media(
         raise
 
 
+@app.get("/api/posts/ranked")
+@logged_operation
+def list_ranked_posts(
+    mode: str = "personalized",
+    authorization: Optional[str] = Header(default=None)
+):
+    from urllib.request import Request as URLRequest, urlopen
+    from urllib.error import URLError
+
+    viewer, _ = current_user(authorization)
+
+    if mode not in {
+        "personalized",
+        "discovery",
+        "following",
+        "chronological"
+    }:
+        raise HTTPException(400, "Invalid feed mode")
+
+    # Keep the existing authentication and visibility rules.
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM posts ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+
+    visible_rows = [
+        row for row in rows
+        if post_visible_to(row, viewer)
+    ]
+
+    posts = [
+        serialize_post(row, viewer)
+        for row in visible_rows
+    ]
+
+    if not posts:
+        return {"posts": []}
+
+    # Retrieve following relationships.
+    with db() as conn:
+        following_ids = {
+            row["followed_user_id"]
+            for row in conn.execute(
+                """
+                SELECT followed_user_id
+                FROM follows
+                WHERE follower_user_id=?
+                """,
+                (viewer["id"],)
+            ).fetchall()
+        }
+
+    now = datetime.now(timezone.utc).timestamp()
+
+    def created_timestamp(value):
+        try:
+            if isinstance(value, (int, float)):
+                return float(value)
+            parsed = datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")
+            )
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except (ValueError, TypeError, OverflowError):
+            return 0.0
+
+    ranking_posts = []
+
+    for post in posts:
+        author_id = post["author_user_id"]
+        followed = author_id in following_ids
+
+        # Conservative temporary ranking signals.
+        # Replace with genuine user-interest and quality
+        # measurements in a later phase.
+        ranking_posts.append({
+            "id": str(post["id"]),
+            "created_at": created_timestamp(
+                post["created_at"]
+            ),
+            "visible": True,
+            "followed": followed,
+            "interest": 0.5,
+            "relationship": 1.0 if followed else 0.0,
+            "quality": min(
+                1.0,
+                max(0, post["like_count"]) / 20.0
+            ),
+            "diversity": 0.5
+        })
+
+    payload = {
+        "mode": mode,
+        "now": now,
+        "posts": ranking_posts
+    }
+
+    algorithm_url = os.environ.get(
+        "NOVEAM_ALGORITHM_URL",
+        "https://noveam-algorithm.onrender.com"
+    ).rstrip("/")
+
+    # Original feed order is the safe fallback.
+    try:
+        request = URLRequest(
+            algorithm_url + "/api/ai/rank",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+
+        with urlopen(request, timeout=3) as response:
+            result = json.load(response)
+
+        post_by_id = {
+            str(post["id"]): post
+            for post in posts
+        }
+
+        ranked = []
+        seen = set()
+
+        for item in result["results"]:
+            post_id = str(item["id"])
+            if post_id in post_by_id and post_id not in seen:
+                ranked.append(post_by_id[post_id])
+                seen.add(post_id)
+
+        # Keep any eligible posts omitted by the service,
+        # except in following mode.
+        if mode != "following":
+            ranked.extend(
+                post for post in posts
+                if str(post["id"]) not in seen
+            )
+
+        return {"posts": ranked}
+
+    except Exception:
+        safe_log(
+            logging.WARNING,
+            "ai_feed",
+            "algorithm_fallback"
+        )
+
+        if mode == "following":
+            posts = [
+                post for post in posts
+                if post["author_user_id"] in following_ids
+            ]
+        elif mode == "chronological":
+            posts.sort(
+                key=lambda p: created_timestamp(
+                    p["created_at"]
+                ),
+                reverse=True
+            )
+
+        return {"posts": posts}
+
 @app.get("/api/posts")
 @logged_operation
 def list_posts(authorization: Optional[str] = Header(default=None)):
