@@ -984,7 +984,96 @@ db.collection('noveamEvents')
   res.set('Cache-Control', 'no-store');
   res.json(result);
 });
+// ===================================================
+// NOVEAM STEP 5.2 — DEVICE & SEARCH ENGINE ANALYTICS
+// ===================================================
 
+app.get(
+  '/api/insights/admin/device-search-analytics',
+  async (req, res, next) => {
+    try {
+      const days = Number(req.query.days ?? 30);
+
+      if (![7, 30].includes(days)) {
+        return res.status(400).json({
+          error: 'Supported periods: 7 or 30 days'
+        });
+      }
+
+      const since = Date.now() - days * 86400000;
+
+      const snapshot = await db.collection('noveamEvents')
+        .where('at', '>=', since)
+        .get();
+
+      const devices = {};
+      const browsers = {};
+      const operatingSystems = {};
+      const searchEngines = {};
+      const trafficSources = {};
+
+      let pageviews = 0;
+
+      function increment(target, key) {
+        target[key] = (target[key] || 0) + 1;
+      }
+
+      for (const doc of snapshot.docs) {
+        const event = doc.data();
+
+        // Count pageviews only, not heartbeats.
+        if (event.type !== 'pageview') continue;
+
+        pageviews++;
+
+        increment(
+          devices,
+          safeCategory(event.deviceType, DEVICE_TYPES)
+        );
+
+        increment(
+          browsers,
+          safeCategory(event.browser, BROWSERS)
+        );
+
+        increment(
+          operatingSystems,
+          safeCategory(event.operatingSystem, OPERATING_SYSTEMS)
+        );
+
+        const source = safeCategory(
+          event.trafficSource,
+          TRAFFIC_SOURCES
+        );
+
+        increment(trafficSources, source);
+
+        if ([
+          'google', 'bing', 'yahoo',
+          'duckduckgo', 'brave', 'other-search'
+        ].includes(source)) {
+          increment(searchEngines, source);
+        }
+      }
+
+      res.set('Cache-Control', 'no-store');
+
+      res.json({
+        periodDays: days,
+        pageviews,
+        devices,
+        browsers,
+        operatingSystems,
+        searchEngines,
+        trafficSources,
+        updatedAt: Date.now()
+      });
+
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 // ===================================================
 // CENTRALIZED ERROR HANDLER
 // ===================================================
