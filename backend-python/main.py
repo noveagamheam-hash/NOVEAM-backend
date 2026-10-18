@@ -24,6 +24,7 @@ import sqlite3
 import time
 import threading
 import uuid
+import httpx
 from fastapi import (
     FastAPI,
     HTTPException,
