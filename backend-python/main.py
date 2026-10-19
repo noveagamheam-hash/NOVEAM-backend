@@ -190,6 +190,32 @@ if SUPABASE_URL and SUPABASE_SECRET_KEY:
         SUPABASE_URL,
         SUPABASE_SECRET_KEY
     )
+                       def upload_to_supabase(stored_name: str, data: bytes, content_type: str):
+    if supabase_storage_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase Storage is not configured"
+        )
+
+    try:
+        supabase_storage_client.storage.from_(
+            SUPABASE_STORAGE_BUCKET
+        ).upload(
+            path=stored_name,
+            file=data,
+            file_options={
+                "content-type": content_type,
+                "upsert": "false"
+            }
+        )
+        return stored_name
+
+    except Exception:
+        logger.exception("Supabase media upload failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Media storage is temporarily unavailable"
+        )
     )
 ).resolve()
 LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "").strip()
@@ -2582,8 +2608,12 @@ def upload_profile_media(
     stored = secrets.token_hex(24) + ALLOWED_UPLOAD_TYPES[ctype]
     _validate_upload(data, ctype)
     try:
-        _stored_path(stored).write_bytes(data)
-        now = datetime.now(timezone.utc).isoformat()
+       upload_to_supabase(
+    stored_name=stored,
+    data=data,
+    content_type=ctype
+)
+    now = datetime.now(timezone.utc).isoformat()
         with db() as conn:
             cur = conn.execute(
                 """
