@@ -173,51 +173,63 @@ UPLOAD_DIR = Path(
     os.environ.get(
         "NOVEAM_UPLOAD_DIR",
         os.environ.get("NOVEAGAMHEAM_UPLOAD_DIR", str(BASE_DIR / "uploads")),
-
-        # NOVEAM persistent storage configuration
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
-SUPABASE_SECRET_KEY = os.environ.get(
-    "SUPABASE_SECRET_KEY", ""
-).strip()
-SUPABASE_STORAGE_BUCKET = os.environ.get(
-    "SUPABASE_STORAGE_BUCKET", "noveam-media"
-).strip()
-
-supabase_storage_client: Client | None = None
-
-if SUPABASE_URL and SUPABASE_SECRET_KEY:
-    supabase_storage_client = create_client(
-        SUPABASE_URL,
-        SUPABASE_SECRET_KEY
-    )
-                       def upload_to_supabase(stored_name: str, data: bytes, content_type: str):
-    if supabase_storage_client is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Supabase Storage is not configured"
-        )
-
-    try:
-        supabase_storage_client.storage.from_(
-            SUPABASE_STORAGE_BUCKET
-        ).upload(
-            path=stored_name,
-            file=data,
-            file_options={
-                "content-type": content_type,
-                "upsert": "false"
-            }
-        )
-        return stored_name
-
-    except Exception:
-        logger.exception("Supabase media upload failed")
-        raise HTTPException(
-            status_code=502,
-            detail="Media storage is temporarily unavailable"
-        )
     )
 ).resolve()
+
+# NOVEAM persistent storage configuration
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+SUPABASE_SECRET_KEY = os.environ.get("SUPABASE_SECRET_KEY", "").strip()
+SUPABASE_STORAGE_BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "noveam-media").strip()
+
+supabase_storage_client: Client | None = None
+if SUPABASE_URL and SUPABASE_SECRET_KEY:
+    supabase_storage_client = create_client(SUPABASE_URL, SUPABASE_SECRET_KEY)
+
+
+def upload_to_supabase(stored_name: str, data: bytes, content_type: str):
+    if supabase_storage_client is None:
+        raise HTTPException(503, "Supabase Storage is not configured")
+    try:
+        supabase_storage_client.storage.from_(SUPABASE_STORAGE_BUCKET).upload(
+            path=stored_name, file=data,
+            file_options={"content-type": content_type, "upsert": "false"},
+        )
+        return stored_name
+    except Exception:
+        safe_log(logging.ERROR, "supabase_upload", "failed")
+        raise HTTPException(502, "Media storage is temporarily unavailable") from None
+
+
+def delete_from_supabase(stored_name: str) -> bool:
+    if supabase_storage_client is None:
+        return False
+    try:
+        supabase_storage_client.storage.from_(SUPABASE_STORAGE_BUCKET).remove([stored_name])
+        return True
+    except Exception:
+        safe_log(logging.ERROR, "supabase_delete", "retry_required")
+        return False
+
+
+def stored_media_response(row, *, download=False):
+    """Call only after the existing route has authorized this file."""
+    from fastapi.responses import Response
+    headers = {"Cache-Control": "private, no-store"}
+    stored_name = row["stored_name"]
+    if supabase_storage_client is not None:
+        try:
+            data = supabase_storage_client.storage.from_(SUPABASE_STORAGE_BUCKET).download(stored_name)
+        except Exception:
+            # Existing local uploads must remain readable during the transition.
+            safe_log(logging.WARNING, "supabase_download", "local_fallback")
+        else:
+            return Response(content=data, media_type=row["content_type"], headers=headers)
+    path = _stored_path(stored_name)
+    if not path.exists():
+        raise HTTPException(404, "Stored image is missing")
+    return FileResponse(path, media_type=row["content_type"], headers=headers)
+
+
 LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "").strip()
 LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "").strip()
 LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "").strip()
@@ -2121,6 +2133,13 @@ def flush_file_cleanup():
         ]
     for name in names:
         try:
+            # Metadata may already be deleted, so do not look up the file's MIME type.
+            # Generated object names are unique; deleting a missing remote object is safe.
+            if supabase_storage_client is not None:
+                if not delete_from_supabase(name):
+                    raise OSError("Supabase cleanup failed")
+            elif Path(name).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} and not _stored_path(name).exists():
+                raise OSError("Supabase image cleanup requires storage configuration")
             _stored_path(name).unlink(missing_ok=True)
             with db() as conn:
                 conn.execute(
@@ -2132,44 +2151,24 @@ def flush_file_cleanup():
 
 @logged_operation
 def cleanup_failed_upload(stored):
-    # First, try removing the object from Supabase Storage.
-    if supabase_storage_client is not None:
-        try:
-            supabase_storage_client.storage.from_(
-                SUPABASE_STORAGE_BUCKET
-            ).remove([stored])
-        except Exception:
-            safe_log(
-                logging.WARNING,
-                "supabase_cleanup",
-                "retry_required"
-            )
-
-    # Also clean up a local file, if one exists.
+    remote_failed = (
+        supabase_storage_client is not None and not delete_from_supabase(stored)
+    )
+    local_failed = False
     try:
         _stored_path(stored).unlink(missing_ok=True)
     except OSError:
-        safe_log(
-            logging.ERROR,
-            "upload_cleanup",
-            "retry_required"
-        )
+        local_failed = True
+    if remote_failed or local_failed:
+        safe_log(logging.ERROR, "upload_cleanup", "retry_required")
         try:
             with db() as conn:
                 conn.execute(
-                    """
-                    INSERT INTO pending_file_cleanup(stored_name)
-                    VALUES(%s)
-                    ON CONFLICT DO NOTHING
-                    """,
-                    (stored,)
+                    "INSERT INTO pending_file_cleanup(stored_name) VALUES(%s) ON CONFLICT DO NOTHING",
+                    (stored,),
                 )
         except Exception:
-            safe_log(
-                logging.ERROR,
-                "upload_cleanup",
-                "retry_queue_failed"
-            )
+            safe_log(logging.ERROR, "upload_cleanup", "retry_queue_failed")
 
 
 @logged_operation
@@ -2583,41 +2582,7 @@ def upload_file(
 def download_file(file_id: int, authorization: Optional[str] = Header(default=None)):
     viewer, _ = current_user(authorization)
     row = file_row_for_access(file_id, viewer)
-    from fastapi.responses import Response
-
-stored_name = row["stored_name"]
-
-if supabase_storage_client is not None:
-    try:
-        image_data = (
-            supabase_storage_client.storage
-            .from_(SUPABASE_STORAGE_BUCKET)
-            .download(stored_name)
-        )
-
-        return Response(
-            content=image_data,
-            media_type=row["content_type"],
-            headers={"Cache-Control": "private, no-store"}
-        )
-
-    except Exception:
-        # Fallback for older images still on local disk.
-        pass
-
-path = _stored_path(stored_name)
-
-if not path.exists():
-    raise HTTPException(
-        status_code=404,
-        detail="Stored image is missing"
-    )
-
-return FileResponse(
-    path,
-    media_type=row["content_type"],
-    headers={"Cache-Control": "private, no-store"}
-)
+    return stored_media_response(row, download=True)
 
 
 @app.delete("/api/files/{file_id}", status_code=204)
@@ -2662,12 +2627,8 @@ def upload_profile_media(
     stored = secrets.token_hex(24) + ALLOWED_UPLOAD_TYPES[ctype]
     _validate_upload(data, ctype)
     try:
-       upload_to_supabase(
-    stored_name=stored,
-    data=data,
-    content_type=ctype
-)
-    now = datetime.now(timezone.utc).isoformat()
+        upload_to_supabase(stored_name=stored, data=data, content_type=ctype)
+        now = datetime.now(timezone.utc).isoformat()
         with db() as conn:
             cur = conn.execute(
                 """
@@ -2731,10 +2692,7 @@ def authenticated_media(
         raise HTTPException(
             status_code=403, detail="You do not have access to this image"
         )
-    path = _stored_path(row["stored_name"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Stored image is missing")
-    return FileResponse(path, media_type=row["content_type"])
+    return stored_media_response(row)
 
 
 @app.post("/api/posts/media", status_code=201)
@@ -2773,14 +2731,10 @@ def upload_post_media(
     stored = secrets.token_hex(24) + ext
     _validate_upload(data, ctype)
     try:
-      if ctype in {"image/jpeg", "image/png", "image/webp"}:
-    upload_to_supabase(
-        stored_name=stored,
-        data=data,
-        content_type=ctype
-    )
-else:
-    _stored_path(stored).write_bytes(data)
+        if ctype in SOCIAL_IMAGE_TYPES:
+            upload_to_supabase(stored_name=stored, data=data, content_type=ctype)
+        else:
+            _stored_path(stored).write_bytes(data)
         now = datetime.now(timezone.utc).isoformat()
         category = "post_image" if ctype in SOCIAL_IMAGE_TYPES else "post_media"
         with db() as conn:
