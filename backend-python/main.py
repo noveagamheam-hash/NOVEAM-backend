@@ -22,6 +22,7 @@ import os
 import secrets
 import psycopg
 from psycopg.rows import dict_row
+from onboarding_backend import initialize_onboarding_database, install_onboarding_routes
 from psycopg import sql as pg_sql
 import time
 import threading
@@ -2152,6 +2153,7 @@ def initialize_database():
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS pending_file_cleanup(stored_name TEXT PRIMARY KEY)"
             )
+        initialize_onboarding_database(db)
         flush_file_cleanup()
 
 
@@ -2239,6 +2241,7 @@ class BodyLimitMiddleware:
 
 
 app = FastAPI(title="Noveagamheam REST API", version="1.7.0", lifespan=lifespan)
+install_onboarding_routes(app, db, current_user)
  # NOVEAM Step 5.5C — Analytics event validation
 # Disabled by default; no data is stored or forwarded.
 
