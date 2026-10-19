@@ -2557,13 +2557,41 @@ def upload_file(
 def download_file(file_id: int, authorization: Optional[str] = Header(default=None)):
     viewer, _ = current_user(authorization)
     row = file_row_for_access(file_id, viewer)
-    path = _stored_path(row["stored_name"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Stored file is missing.")
-    audit(viewer["id"], "download", f"file:{file_id}")
-    return FileResponse(
-        path, media_type=row["content_type"], filename=row["original_name"]
+    from fastapi.responses import Response
+
+stored_name = row["stored_name"]
+
+if supabase_storage_client is not None:
+    try:
+        image_data = (
+            supabase_storage_client.storage
+            .from_(SUPABASE_STORAGE_BUCKET)
+            .download(stored_name)
+        )
+
+        return Response(
+            content=image_data,
+            media_type=row["content_type"],
+            headers={"Cache-Control": "private, no-store"}
+        )
+
+    except Exception:
+        # Fallback for older images still on local disk.
+        pass
+
+path = _stored_path(stored_name)
+
+if not path.exists():
+    raise HTTPException(
+        status_code=404,
+        detail="Stored image is missing"
     )
+
+return FileResponse(
+    path,
+    media_type=row["content_type"],
+    headers={"Cache-Control": "private, no-store"}
+)
 
 
 @app.delete("/api/files/{file_id}", status_code=204)
