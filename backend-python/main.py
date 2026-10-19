@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+from supabase import create_client, Client
 import asyncio
 import base64
 import functools
@@ -172,6 +173,23 @@ UPLOAD_DIR = Path(
     os.environ.get(
         "NOVEAM_UPLOAD_DIR",
         os.environ.get("NOVEAGAMHEAM_UPLOAD_DIR", str(BASE_DIR / "uploads")),
+
+        # NOVEAM persistent storage configuration
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+SUPABASE_SECRET_KEY = os.environ.get(
+    "SUPABASE_SECRET_KEY", ""
+).strip()
+SUPABASE_STORAGE_BUCKET = os.environ.get(
+    "SUPABASE_STORAGE_BUCKET", "noveam-media"
+).strip()
+
+supabase_storage_client: Client | None = None
+
+if SUPABASE_URL and SUPABASE_SECRET_KEY:
+    supabase_storage_client = create_client(
+        SUPABASE_URL,
+        SUPABASE_SECRET_KEY
+    )
     )
 ).resolve()
 LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "").strip()
