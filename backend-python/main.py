@@ -2118,6 +2118,7 @@ def migrate_post_columns():
 
 @logged_operation
 def initialize_database():
+    initialize_onboarding_database(db)
     with db() as migration_conn:
         migration_conn.execute("SELECT pg_advisory_xact_lock(726683216)")
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
