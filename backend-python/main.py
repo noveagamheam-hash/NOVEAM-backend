@@ -2132,18 +2132,44 @@ def flush_file_cleanup():
 
 @logged_operation
 def cleanup_failed_upload(stored):
+    # First, try removing the object from Supabase Storage.
+    if supabase_storage_client is not None:
+        try:
+            supabase_storage_client.storage.from_(
+                SUPABASE_STORAGE_BUCKET
+            ).remove([stored])
+        except Exception:
+            safe_log(
+                logging.WARNING,
+                "supabase_cleanup",
+                "retry_required"
+            )
+
+    # Also clean up a local file, if one exists.
     try:
         _stored_path(stored).unlink(missing_ok=True)
     except OSError:
-        safe_log(logging.ERROR, "upload_cleanup", "retry_required")
+        safe_log(
+            logging.ERROR,
+            "upload_cleanup",
+            "retry_required"
+        )
         try:
             with db() as conn:
                 conn.execute(
-                    'INSERT INTO pending_file_cleanup(stored_name) VALUES(%s) ON CONFLICT DO NOTHING',
-                    (stored,),
+                    """
+                    INSERT INTO pending_file_cleanup(stored_name)
+                    VALUES(%s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (stored,)
                 )
         except Exception:
-            safe_log(logging.ERROR, "upload_cleanup", "retry_queue_failed")
+            safe_log(
+                logging.ERROR,
+                "upload_cleanup",
+                "retry_queue_failed"
+            )
 
 
 @logged_operation
