@@ -2747,7 +2747,14 @@ def upload_post_media(
     stored = secrets.token_hex(24) + ext
     _validate_upload(data, ctype)
     try:
-        _stored_path(stored).write_bytes(data)
+      if ctype in {"image/jpeg", "image/png", "image/webp"}:
+    upload_to_supabase(
+        stored_name=stored,
+        data=data,
+        content_type=ctype
+    )
+else:
+    _stored_path(stored).write_bytes(data)
         now = datetime.now(timezone.utc).isoformat()
         category = "post_image" if ctype in SOCIAL_IMAGE_TYPES else "post_media"
         with db() as conn:
