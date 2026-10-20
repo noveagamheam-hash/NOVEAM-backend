@@ -24,6 +24,7 @@ import secrets
 import psycopg
 from psycopg.rows import dict_row
 from onboarding_backend import initialize_onboarding_database, install_onboarding_routes
+from push_backend import initialize_push_database, install_push_routes, enqueue_push, push_worker
 from psycopg import sql as pg_sql
 import time
 import threading
@@ -1542,10 +1543,10 @@ def create_notification(
     ).fetchone()
     if pref is not None and (not bool(pref["notifications"])):
         return
-    conn.execute(
+    notification = conn.execute(
         """
         INSERT INTO notifications( user_id,actor_user_id,type,title,body, target_type,target_id,created_at )
-        VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
         """,
         (
             user_id,
@@ -1557,7 +1558,8 @@ def create_notification(
             target_id,
             datetime.now(timezone.utc).isoformat(),
         ),
-    )
+    ).fetchone()
+    enqueue_push(conn, notification["id"], user_id)
 
 
 @logged_operation
@@ -2254,10 +2256,19 @@ async def lifespan(app):
     )
     logger.setLevel(level)
     await run_in_threadpool(initialize_database)
+    await run_in_threadpool(initialize_push_database, db)
     await run_in_threadpool(initialize_firebase)
     check_noveam_network_configuration()
     safe_log(logging.INFO, "application", "ready")
-    yield
+    push_task = asyncio.create_task(push_worker(db))
+    try:
+        yield
+    finally:
+        push_task.cancel()
+        try:
+            await push_task
+        except asyncio.CancelledError:
+            pass
     for sockets in list(realtime_hub.clients.values()):
         for ws in list(sockets):
             try:
@@ -2328,6 +2339,7 @@ class BodyLimitMiddleware:
 
 app = FastAPI(title="Noveagamheam REST API", version="1.7.0", lifespan=lifespan)
 install_onboarding_routes(app, db, current_user)
+install_push_routes(app, db, current_user)
  # NOVEAM Step 5.5C — Analytics event validation
 # Disabled by default; no data is stored or forwarded.
 
