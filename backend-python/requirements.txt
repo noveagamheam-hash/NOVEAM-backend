@@ -6,3 +6,4 @@ firebase-admin==6.6.0
 python-multipart==0.0.32
 psycopg[binary]>=3.2,<4
 supabase
+pywebpush==2.5.0
