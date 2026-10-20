@@ -242,12 +242,28 @@ MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 # Clinical/privileged roles require deployment-managed approval, never profile self-service.
 SELF_SERVICE_ROLES = {
     "Patient",
+    "Doctor",
     "Parent",
     "Sibling",
     "Guardian",
     "Friend",
+    "Gym Trainer",
+    "Coach/Instructor",
+    "Founder",
+    "Co-Founder",
+    "Owner",
+    "Director",
+    "Management",
+    "Principal",
+    "Dean",
+    "Head/HOD",
+    "Teacher",
+    "Faculty",
+    "Staff",
     "Student/Learner",
     "Member",
+    "Volunteer",
+    "Partner/Collaborator",
     "Other",
 }
 _active_connection = ContextVar("noveam_postgres_connection", default=None)
