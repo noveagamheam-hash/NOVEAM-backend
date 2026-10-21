@@ -1,7 +1,9 @@
 
+
 import express from 'express';
 import rateLimit from 'express-rate-limit';
 import cors from 'cors';
+import pg from 'pg';
 
 import {
   initializeApp,
@@ -14,7 +16,24 @@ import {
   summarize,
   summarizeDateRange
 } from './metrics.js';
+// ===================================================
+// NOVEAM ADMIN — POSTGRESQL CONNECTION
+// ===================================================
 
+const { Pool } = pg;
+
+const adminDb = process.env.ADMIN_DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.ADMIN_DATABASE_URL,
+      max: 5,
+      connectionTimeoutMillis: 10000,
+      idleTimeoutMillis: 30000
+    })
+  : null;
+
+adminDb?.on('error', (error) => {
+  console.error('NOVEAM Admin database pool error:', error.message);
+});
 // ===================================================
 // NOVEAM ADMIN SERVER — CONFIGURATION
 // ===================================================
