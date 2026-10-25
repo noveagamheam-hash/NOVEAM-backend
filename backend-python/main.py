@@ -2339,6 +2339,60 @@ class BodyLimitMiddleware:
 
 app = FastAPI(title="Noveagamheam REST API", version="1.7.0", lifespan=lifespan)
 install_onboarding_routes(app, db, current_user)
+# ============================================================
+# NOVEAM — Professional Catalog APIs
+# Read-only endpoints
+# ============================================================
+
+@app.get("/api/professional/categories")
+def get_professional_categories():
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT id, name, description
+            FROM professional_categories
+            WHERE is_active = TRUE
+            ORDER BY name ASC
+        """).fetchall()
+
+    return {
+        "categories": [dict(row) for row in rows]
+    }
+
+
+@app.get("/api/professional/subcategories")
+def get_professional_subcategories(category_id: int):
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT id, category_id, name
+            FROM professional_subcategories
+            WHERE category_id = %s
+              AND is_active = TRUE
+            ORDER BY name ASC
+        """, (category_id,)).fetchall()
+
+    return {
+        "subcategories": [dict(row) for row in rows]
+    }
+
+
+@app.get("/api/cinema/industries")
+def get_cinema_industries():
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT
+                id,
+                name,
+                country,
+                primary_language,
+                region
+            FROM cinema_industries
+            WHERE is_active = TRUE
+            ORDER BY country ASC, name ASC
+        """).fetchall()
+
+    return {
+        "industries": [dict(row) for row in rows]
+    }
 install_push_routes(app, db, current_user)
  # NOVEAM Step 5.5C — Analytics event validation
 # Disabled by default; no data is stored or forwarded.
