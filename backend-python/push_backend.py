@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from pywebpush import webpush, WebPushException
 import requests
+from notification_events import activity_visible
 
 log = logging.getLogger('noveam.push')
 
@@ -100,22 +101,39 @@ def still_allowed(conn, row):
     setting = conn.execute('SELECT notifications FROM user_settings WHERE user_id=%s', (row['user_id'],)).fetchone()
     if setting and not bool(setting['notifications']):
         return False
-    if row['type'] in ('NEW_MESSAGE', 'INCOMING_CALL'):
+    if row['actor_user_id'] is not None and conn.execute('''SELECT 1 FROM conversation_controls WHERE blocked=1
+            AND ((user_id=%s AND peer_user_id=%s) OR (user_id=%s AND peer_user_id=%s))''',
+            (row['user_id'],row['actor_user_id'],row['actor_user_id'],row['user_id'])).fetchone():
+        return False
+    if row['type'] in ('NEW_MESSAGE', 'CHANNEL_MESSAGE', 'MEETING_MESSAGE', 'INCOMING_CALL'):
         preferences = conn.execute('''SELECT message_notifications,incoming_call_notifications
             FROM communication_settings WHERE user_id=%s''', (row['user_id'],)).fetchone()
-        key = 'message_notifications' if row['type'] == 'NEW_MESSAGE' else 'incoming_call_notifications'
+        key = 'incoming_call_notifications' if row['type'] == 'INCOMING_CALL' else 'message_notifications'
         if preferences and not bool(preferences[key]):
             return False
         muted = conn.execute('''SELECT 1 FROM conversation_controls WHERE user_id=%s
             AND peer_user_id=%s AND (muted=1 OR blocked=1)''', (row['user_id'], row['actor_user_id'])).fetchone()
         if muted:
             return False
-    return True
+    return activity_visible(conn, row)
 
 
 def notification_payload(row):
     kind = row.get('type')
-    body = {'NEW_MESSAGE': 'You have a new message.', 'INCOMING_CALL': 'Someone called you on NOVEAM.'}.get(kind, 'You have a new notification.')
+    body = {
+        'NEW_MESSAGE': 'You have a new direct message.',
+        'CHANNEL_MESSAGE': 'You have a new group message.',
+        'MEETING_MESSAGE': 'You have a new meeting message.',
+        'INCOMING_CALL': 'You have an incoming NOVEAM call.',
+        'NEW_POST': 'A NOVEAM contact shared a new post.',
+        'POST_LIKE': 'Someone liked your post.', 'POST_COMMENT': 'Someone commented on your post.',
+        'GROUP_POST': 'There is a new post in your group.', 'GROUP_COMMENT': 'Someone commented on your group post.',
+        'PAGE_POST': 'A page you follow shared a new post.', 'PAGE_COMMENT': 'Someone commented on your page post.',
+        'PAGE_LIKE': 'Someone liked your page post.', 'MEETING_INVITE': 'You have a meeting invitation.',
+        'MEETING_CREATED': 'A group meeting was created.', 'MEETING_ADMITTED': 'You were admitted to a meeting.',
+        'MEETING_ENDED': 'Your meeting ended.', 'MEETING_JOIN_REQUEST': 'Someone is waiting to join your meeting.',
+        'EVENT_INVITE': 'You have an event invitation.'
+    }.get(kind, 'You have a new notification.')
     if row.get('notification_id') is None:
         body = 'Push notifications are working on this device.'
     return {'title': 'NOVEAM', 'body': body, 'url': '/notifications.html', 'user_id': str(row['user_id']),
@@ -128,7 +146,7 @@ def deliver_one(db):
     # A row lock prevents two server processes sending the same job concurrently.
     # Keep bounded network work off the event loop and outside application requests.
     with db() as conn:
-        row = conn.execute('''SELECT d.*,s.endpoint,s.p256dh,s.auth,n.type,n.actor_user_id,n.read_at,
+        row = conn.execute('''SELECT d.*,s.endpoint,s.p256dh,s.auth,n.type,n.actor_user_id,n.read_at,n.target_id,n.target_type,
                 EXTRACT(EPOCH FROM (now()-d.created_at)) AS age
             FROM push_deliveries d JOIN push_subscriptions s ON s.id=d.subscription_id AND s.user_id=d.user_id
             LEFT JOIN notifications n ON n.id=d.notification_id
@@ -198,6 +216,21 @@ def install_push_routes(app, db, current_user):
     def push_config():
         return {'enabled': configured(), 'public_key': config()[0] if configured() else ''}
 
+    @app.get('/api/push/status')
+    def push_status(authorization: str | None = Header(default=None)):
+        user, _ = current_user(authorization)
+        with db() as conn:
+            devices = conn.execute('SELECT count(*) AS n FROM push_subscriptions WHERE user_id=%s', (user['id'],)).fetchone()['n']
+            jobs = conn.execute('''SELECT
+                count(*) FILTER (WHERE finished_at IS NULL) AS pending,
+                count(*) FILTER (WHERE finished_at IS NOT NULL AND attempts>=6) AS failed,
+                count(*) FILTER (WHERE finished_at IS NOT NULL AND attempts<6) AS processed
+                FROM push_deliveries WHERE user_id=%s''', (user['id'],)).fetchone()
+            events = conn.execute('SELECT type,count(*) AS count FROM notifications WHERE user_id=%s GROUP BY type ORDER BY type', (user['id'],)).fetchall()
+            setting = conn.execute('SELECT notifications FROM user_settings WHERE user_id=%s', (user['id'],)).fetchone()
+        return {'configured': configured(), 'notifications_enabled': bool(setting['notifications']) if setting else True,
+                'registered_devices': devices, 'queue': dict(jobs), 'event_counts': [dict(row) for row in events]}
+
     @app.post('/api/push/subscriptions')
     def subscribe(payload: Subscription, authorization: str | None = Header(default=None)):
         user, _ = current_user(authorization)
@@ -221,9 +254,6 @@ def install_push_routes(app, db, current_user):
         with db() as conn:
             conn.execute('SELECT pg_advisory_xact_lock(%s)', (int(user['id']),))
             existing = conn.execute('SELECT user_id FROM push_subscriptions WHERE id=%s FOR UPDATE', (sid,)).fetchone()
-            count = conn.execute('SELECT count(*) AS n FROM push_subscriptions WHERE user_id=%s', (user['id'],)).fetchone()['n']
-            if count >= 10 and (not existing or existing['user_id'] != user['id']):
-                raise HTTPException(409, 'Device limit reached. Disable notifications on an older device first.')
             # When the same browser changes accounts, discard the previous owner's pending jobs.
             if existing and existing['user_id'] != user['id']:
                 conn.execute('DELETE FROM push_deliveries WHERE subscription_id=%s', (sid,))
