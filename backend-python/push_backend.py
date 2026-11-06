@@ -136,8 +136,12 @@ def notification_payload(row):
     }.get(kind, 'You have a new notification.')
     if row.get('notification_id') is None:
         body = 'Push notifications are working on this device.'
-    return {'title': 'NOVEAM', 'body': body, 'url': '/notifications.html', 'user_id': str(row['user_id']),
-            'tag': 'noveam-' + str(row.get('notification_id') or ('test-' + str(row['id'])))}
+    is_call = kind == 'INCOMING_CALL'
+    url = '/communication.html' if is_call else '/messages.html' if kind in ('NEW_MESSAGE', 'CHANNEL_MESSAGE', 'MEETING_MESSAGE') else '/notifications.html'
+    return {'title': 'NOVEAM', 'body': body, 'url': url, 'user_id': str(row['user_id']),
+            'type': kind or 'TEST', 'notification_id': row.get('notification_id'),
+            'tag': 'noveam-' + str(row.get('notification_id') or ('test-' + str(row['id']))),
+            'require_interaction': is_call, 'vibrate': [300, 150, 300, 150, 600] if is_call else [120]}
 
 
 def deliver_one(db):
