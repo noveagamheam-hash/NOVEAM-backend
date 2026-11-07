@@ -1,0 +1,367 @@
+{
+  "version": "1.6",
+  "status": "staging-draft",
+  "terms": "For synthetic staging tests only. This sample agreement exercises the Rules acceptance flow.",
+  "sections": [
+    {
+      "id": 1,
+      "chapter": "Getting started",
+      "title": "Purpose and scope",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 2,
+      "chapter": "Getting started",
+      "title": "Who can use NOVEAM",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 3,
+      "chapter": "Getting started",
+      "title": "Account ownership",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 4,
+      "chapter": "Getting started",
+      "title": "Account security",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 5,
+      "chapter": "Getting started",
+      "title": "Rules acceptance",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 6,
+      "chapter": "Getting started",
+      "title": "Policy updates",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 7,
+      "chapter": "Equality and participation",
+      "title": "Equal treatment",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 8,
+      "chapter": "Equality and participation",
+      "title": "Disability inclusion",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 9,
+      "chapter": "Equality and participation",
+      "title": "Language access",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 10,
+      "chapter": "Equality and participation",
+      "title": "Respectful disagreement",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 11,
+      "chapter": "Equality and participation",
+      "title": "Harassment",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 12,
+      "chapter": "Equality and participation",
+      "title": "Bullying",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 13,
+      "chapter": "Threats and personal safety",
+      "title": "Threats of violence",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 14,
+      "chapter": "Threats and personal safety",
+      "title": "Targeted stalking",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 15,
+      "chapter": "Threats and personal safety",
+      "title": "Coercion",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 16,
+      "chapter": "Threats and personal safety",
+      "title": "Doxxing",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 17,
+      "chapter": "Threats and personal safety",
+      "title": "Immediate danger",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 18,
+      "chapter": "Threats and personal safety",
+      "title": "Self-harm support",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 19,
+      "chapter": "Children and sexual safety",
+      "title": "Child safety",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 20,
+      "chapter": "Children and sexual safety",
+      "title": "Grooming",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 21,
+      "chapter": "Children and sexual safety",
+      "title": "Sexual exploitation",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 22,
+      "chapter": "Children and sexual safety",
+      "title": "Non-consensual intimate material",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 23,
+      "chapter": "Children and sexual safety",
+      "title": "Sexual harassment",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 24,
+      "chapter": "Children and sexual safety",
+      "title": "Sensitive reports",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 25,
+      "chapter": "Fraud and platform integrity",
+      "title": "Credential solicitation",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 26,
+      "chapter": "Fraud and platform integrity",
+      "title": "Impersonation",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 27,
+      "chapter": "Fraud and platform integrity",
+      "title": "Financial scams",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 28,
+      "chapter": "Fraud and platform integrity",
+      "title": "Spam",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 29,
+      "chapter": "Fraud and platform integrity",
+      "title": "Malicious links",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 30,
+      "chapter": "Fraud and platform integrity",
+      "title": "Coordinated abuse",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 31,
+      "chapter": "Content and communication",
+      "title": "Public posts",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 32,
+      "chapter": "Content and communication",
+      "title": "Comments",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 33,
+      "chapter": "Content and communication",
+      "title": "Private messaging",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 34,
+      "chapter": "Content and communication",
+      "title": "Groups",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 35,
+      "chapter": "Content and communication",
+      "title": "Pages",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 36,
+      "chapter": "Content and communication",
+      "title": "Calls and meetings",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 37,
+      "chapter": "Privacy and rights",
+      "title": "Personal information",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 38,
+      "chapter": "Privacy and rights",
+      "title": "Consent",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 39,
+      "chapter": "Privacy and rights",
+      "title": "Account closure",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 40,
+      "chapter": "Privacy and rights",
+      "title": "Privacy requests",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 41,
+      "chapter": "Privacy and rights",
+      "title": "Copyright",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 42,
+      "chapter": "Privacy and rights",
+      "title": "Confidential information",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 43,
+      "chapter": "Reporting and review",
+      "title": "User reports",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 44,
+      "chapter": "Reporting and review",
+      "title": "Evidence",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 45,
+      "chapter": "Reporting and review",
+      "title": "Reporter protection",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 46,
+      "chapter": "Reporting and review",
+      "title": "Human review",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 47,
+      "chapter": "Reporting and review",
+      "title": "Emergency review",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 48,
+      "chapter": "Reporting and review",
+      "title": "Conflicts of interest",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 49,
+      "chapter": "Warnings and appeals",
+      "title": "Educational reminders",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 50,
+      "chapter": "Warnings and appeals",
+      "title": "Formal warnings",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 51,
+      "chapter": "Warnings and appeals",
+      "title": "Temporary restrictions",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 52,
+      "chapter": "Warnings and appeals",
+      "title": "Action notices",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 53,
+      "chapter": "Warnings and appeals",
+      "title": "Independent appeals",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 54,
+      "chapter": "Warnings and appeals",
+      "title": "Decision correction",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 55,
+      "chapter": "Governance and accessibility",
+      "title": "Safety bot limitations",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 56,
+      "chapter": "Governance and accessibility",
+      "title": "Audit records",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 57,
+      "chapter": "Governance and accessibility",
+      "title": "Staff access",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 58,
+      "chapter": "Governance and accessibility",
+      "title": "Data retention",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 59,
+      "chapter": "Governance and accessibility",
+      "title": "Accessible policy formats",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    },
+    {
+      "id": 60,
+      "chapter": "Governance and accessibility",
+      "title": "Contact and support",
+      "text": "Staging placeholder. Insert the approved wording for this section before publishing."
+    }
+  ]
+}
