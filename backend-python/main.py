@@ -8361,7 +8361,7 @@ def serialize_user_settings(row):
     if row is None:
         return defaults
     return {
-        key: bool(row[key]) if isinstance(default, bool) else row[key]
+        key: bool(row.get(key, default)) if isinstance(default, bool) else row.get(key, default)
         for key, default in defaults.items()
     }
 
