@@ -23,6 +23,7 @@ import os
 import secrets
 import psycopg
 from psycopg.rows import dict_row
+import policy_safety
 from onboarding_backend import initialize_onboarding_database, install_onboarding_routes
 from push_backend import initialize_push_database, install_push_routes, enqueue_push, push_worker
 from psycopg import sql as pg_sql
@@ -842,6 +843,15 @@ class NoveamRealtimeHub:
     @logged_operation
     async def send(self, uid, event):
         connections = list(self.clients.get(uid, set()))
+        if connections and policy_safety.ENABLED:
+            def check_recipient():
+                with db() as conn:
+                    policy_safety.check_access(conn, uid)
+
+            try:
+                await run_in_threadpool(check_recipient)
+            except HTTPException:
+                return
         for ws in connections:
             try:
                 await ws.send_json(event)
@@ -1093,7 +1103,7 @@ def create_session(user_id: int) -> str:
 
 
 @logged_operation
-def current_user(authorization: Optional[str]):
+def authenticate_session(authorization: Optional[str], *, protected=False):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
     token = authorization[7:].strip()
@@ -1103,9 +1113,23 @@ def current_user(authorization: Optional[str]):
             'SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=%s AND s.expires_at>%s',
             (token, now),
         ).fetchone()
-    if not row:
-        raise HTTPException(status_code=401, detail="Session expired or invalid")
-    return (row, token)
+        if not row:
+            raise HTTPException(status_code=401, detail="Session expired or invalid")
+        if protected and policy_safety.ENABLED:
+            policy_safety.check_access(conn, row["id"])
+    return row, token
+
+
+def current_user(authorization: Optional[str]):
+    return authenticate_session(authorization, protected=True)
+
+
+def session_response(user, token):
+    data = {"token": token, "user": public_user(user)}
+    if policy_safety.ENABLED:
+        with db() as conn:
+            data["policy"] = policy_safety.policy_status(conn, user["id"])
+    return data
 
 
 @logged_operation
@@ -2205,7 +2229,6 @@ def migrate_post_columns():
 
 @logged_operation
 def initialize_database():
-    initialize_onboarding_database(db)
     with db() as migration_conn:
         migration_conn.execute("SELECT pg_advisory_xact_lock(726683216)")
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -2242,6 +2265,8 @@ def initialize_database():
                 "CREATE TABLE IF NOT EXISTS pending_file_cleanup(stored_name TEXT PRIMARY KEY)"
             )
         initialize_onboarding_database(db)
+        if policy_safety.ENABLED:
+            policy_safety.current_policy(migration_conn)
         flush_file_cleanup()
 
 
@@ -2339,6 +2364,8 @@ class BodyLimitMiddleware:
 
 app = FastAPI(title="Noveagamheam REST API", version="1.7.0", lifespan=lifespan)
 install_onboarding_routes(app, db, current_user)
+if policy_safety.ENABLED:
+    policy_safety.install_policy_safety(app, db, authenticate_session)
 # ============================================================
 # NOVEAM — Professional Catalog APIs
 # Read-only endpoints
@@ -3098,6 +3125,11 @@ def create_post(
         row = conn.execute(
             'SELECT * FROM posts WHERE id=%s', (cur_id,)
         ).fetchone()
+        if visibility == "PUBLIC":
+            policy_safety.observe_public_text(
+                conn, viewer["id"], "post", cur_id,
+                (payload.article_title or "") + "\n" + payload.text,
+            )
     audit(viewer["id"], "create", f"post:{row['id']}")
     return serialize_post(row, viewer)
 
@@ -3132,6 +3164,8 @@ def update_post(
             ),
         )
         row = conn.execute('SELECT * FROM posts WHERE id=%s', (post_id,)).fetchone()
+        if visibility == "PUBLIC":
+            policy_safety.observe_public_text(conn, viewer["id"], "post", post_id, payload.text)
     return serialize_post(row, viewer)
 
 
@@ -3241,6 +3275,8 @@ def add_comment(
             ),
         )
         cur_id = cur.fetchone()["id"]
+        if post["visibility"] == "PUBLIC":
+            policy_safety.observe_public_text(conn, viewer["id"], "comment", cur_id, payload.text)
         if post["author_user_id"] != viewer["id"]:
             create_notification(
                 conn,
@@ -5036,7 +5072,7 @@ def report_communication_user(
     payload: CommunicationReportRequest,
     authorization: Optional[str] = Header(default=None),
 ):
-    u, _ = current_user(authorization)
+    u, _ = authenticate_session(authorization)
     now = datetime.now(timezone.utc).isoformat()
     if peer_user_id == u["id"]:
         raise HTTPException(400, "Invalid user")
@@ -5048,6 +5084,8 @@ def report_communication_user(
             """,
             (u["id"], peer_user_id, payload.reason.strip(), now),
         )
+        if policy_safety.ENABLED:
+            policy_safety.open_report(conn, u["id"], peer_user_id, payload.reason.strip(), "communication")
     return {"ok": True}
 
 
@@ -7560,6 +7598,7 @@ async def communication_websocket(ws: WebSocket):
                 data = await asyncio.wait_for(ws.receive_json(), timeout=30)
             except asyncio.TimeoutError:
                 continue
+            await run_in_threadpool(authenticate)
             if not isinstance(data, dict):
                 await ws.close(code=4400)
                 return
@@ -7828,7 +7867,7 @@ def register(payload: RegisterRequest):
             status_code=409, detail="Email ID or phone number is already registered"
         )
     token = create_session(user_id)
-    return {"token": token, "user": public_user(row)}
+    return session_response(row, token)
 
 
 @app.post("/api/auth/login")
@@ -7887,7 +7926,7 @@ def login(payload: LoginRequest):
             )
         return {"requires_2fa": True, "challenge": challenge}
     token = create_session(row["id"])
-    return {"token": token, "user": public_user(row)}
+    return session_response(row, token)
 
 
 @app.post("/api/auth/2fa/login")
@@ -7941,7 +7980,7 @@ def two_factor_login(payload: TwoFactorLoginRequest):
         ).fetchone()
         token = create_session(row["user_id"])
         audit(row["user_id"], "two_factor_login", "account:security")
-    return {"token": token, "user": public_user(user)}
+    return session_response(user, token)
 
 
 @app.get("/api/auth/2fa/status")
@@ -8030,7 +8069,7 @@ def two_factor_disable(
 @app.post("/api/auth/logout")
 @logged_operation(level=logging.INFO)
 def logout(authorization: Optional[str] = Header(default=None)):
-    _, token = current_user(authorization)
+    _, token = authenticate_session(authorization)
     with db() as conn:
         conn.execute('DELETE FROM sessions WHERE token=%s', (token,))
     return {"ok": True}
@@ -8039,7 +8078,7 @@ def logout(authorization: Optional[str] = Header(default=None)):
 @app.get("/api/auth/sessions")
 @logged_operation
 def list_sessions(authorization: Optional[str] = Header(default=None)):
-    user, current_token = current_user(authorization)
+    user, current_token = authenticate_session(authorization)
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
         conn.execute('DELETE FROM sessions WHERE expires_at < %s', (now,))
@@ -8068,7 +8107,7 @@ def list_sessions(authorization: Optional[str] = Header(default=None)):
 @app.post("/api/auth/logout-others")
 @logged_operation(level=logging.INFO)
 def logout_other_sessions(authorization: Optional[str] = Header(default=None)):
-    user, current_token = current_user(authorization)
+    user, current_token = authenticate_session(authorization)
     with db() as conn:
         cur = conn.execute(
             'DELETE FROM sessions WHERE user_id=%s AND token<>%s',
@@ -8082,7 +8121,7 @@ def logout_other_sessions(authorization: Optional[str] = Header(default=None)):
 @app.post("/api/auth/logout-all")
 @logged_operation(level=logging.INFO)
 def logout_all_sessions(authorization: Optional[str] = Header(default=None)):
-    user, _ = current_user(authorization)
+    user, _ = authenticate_session(authorization)
     with db() as conn:
         cur = conn.execute('DELETE FROM sessions WHERE user_id=%s', (user["id"],))
         removed = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
@@ -8180,7 +8219,7 @@ def update_user_settings(
 @app.get("/api/users/me")
 @logged_operation
 def me(authorization: Optional[str] = Header(default=None)):
-    row, _ = current_user(authorization)
+    row, _ = authenticate_session(authorization)
     data = public_user(row)
     data["email"] = row["email"] if "email" in row.keys() else ""
     data["phone"] = row["phone"] if "phone" in row.keys() else ""
@@ -8189,6 +8228,9 @@ def me(authorization: Optional[str] = Header(default=None)):
             'SELECT display_name FROM profiles WHERE user_id=%s', (row["id"],)
         ).fetchone()
     data["display_name"] = profile["display_name"] if profile else row["full_name"]
+    if policy_safety.ENABLED:
+        with db() as conn:
+            data["policy"] = policy_safety.policy_status(conn, row["id"])
     return data
 
 
@@ -8249,7 +8291,7 @@ def update_account_contact(
 def delete_account(
     payload: DeleteAccountRequest, authorization: Optional[str] = Header(default=None)
 ):
-    user, _ = current_user(authorization)
+    user, _ = authenticate_session(authorization)
     if payload.confirmation.strip().upper() != "DELETE":
         raise HTTPException(400, "Type DELETE to confirm permanent account deletion")
     if not verify_password(payload.current_password, user["password_hash"]):
