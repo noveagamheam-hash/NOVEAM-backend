@@ -8,8 +8,9 @@ from collections import OrderedDict, deque
 from contextlib import contextmanager, asynccontextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
+from email.message import EmailMessage
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from supabase import create_client, Client
 import asyncio
 import base64
@@ -21,6 +22,8 @@ import json
 import logging
 import os
 import secrets
+import smtplib
+import ssl
 import psycopg
 from psycopg.rows import dict_row
 import policy_safety
@@ -43,10 +46,11 @@ from fastapi import (
     Request,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 from starlette.concurrency import run_in_threadpool
+from urllib.parse import urlencode
 
 try:
     from livekit import api as livekit_api
@@ -240,6 +244,16 @@ NOVEAM_REQUIRE_HTTPS = _env_bool("NOVEAM_REQUIRE_HTTPS")
 NOVEAM_TRUST_PROXY_HTTPS = _env_bool("NOVEAM_TRUST_PROXY_HTTPS")
 NOVEAM_MAX_REQUEST_BYTES = _env_positive_int("NOVEAM_MAX_REQUEST_BYTES", 10485760)
 NOVEAM_RATE_LIMIT_PER_MINUTE = _env_positive_int("NOVEAM_RATE_LIMIT_PER_MINUTE", 180)
+NOVEAM_FRONTEND_BASE_URL = os.environ.get(
+    "NOVEAM_FRONTEND_BASE_URL", "https://noveam.in"
+).strip().rstrip("/")
+NOVEAM_SMTP_HOST = os.environ.get("NOVEAM_SMTP_HOST", "").strip()
+NOVEAM_SMTP_PORT = _env_positive_int("NOVEAM_SMTP_PORT", 587)
+NOVEAM_SMTP_USERNAME = os.environ.get("NOVEAM_SMTP_USERNAME", "").strip()
+NOVEAM_SMTP_PASSWORD = os.environ.get("NOVEAM_SMTP_PASSWORD", "")
+NOVEAM_SMTP_FROM = os.environ.get("NOVEAM_SMTP_FROM", NOVEAM_SMTP_USERNAME).strip()
+NOVEAM_SMTP_USE_SSL = _env_bool("NOVEAM_SMTP_USE_SSL")
+NOVEAM_SMTP_STARTTLS = _env_bool("NOVEAM_SMTP_STARTTLS", "1")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 # Clinical/privileged roles require deployment-managed approval, never profile self-service.
 SELF_SERVICE_ROLES = {
@@ -739,6 +753,15 @@ class LoginRequest(NoveamModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class ForgotPasswordRequest(NoveamModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class ResetPasswordRequest(NoveamModel):
+    token: str = Field(min_length=32, max_length=200)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class ChangePasswordRequest(NoveamModel):
     current_password: str = Field(min_length=1, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
@@ -776,6 +799,21 @@ class UserSettingsUpdate(NoveamModel):
     profile_visibility: str = Field(default="connections", max_length=30)
     activity_status: bool = True
     connection_requests: bool = True
+
+
+class UserSettingsPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    theme: Literal["system", "light", "dark"] = "system"
+    language: str = Field(default="en", pattern=r"^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8}){0,2}$", max_length=20)
+    notifications: StrictBool = True
+    profile_visibility: Literal["public", "connections", "private"] = "connections"
+    activity_status: StrictBool = True
+    connection_requests: StrictBool = True
+    email_notifications: StrictBool = False
+    sms_notifications: StrictBool = False
+    reduced_motion: StrictBool = False
+    large_text: StrictBool = False
 
 
 class ProfileUpdate(NoveamModel):
@@ -1486,6 +1524,15 @@ def _communication_settings_row(conn, user_id: int):
     ).fetchone()
 
 
+def _presence_visible(conn, user_id: int):
+    if not _communication_settings_row(conn, user_id)["online_status"]:
+        return False
+    settings = conn.execute(
+        "SELECT activity_status FROM user_settings WHERE user_id=%s", (user_id,)
+    ).fetchone()
+    return settings is None or bool(settings["activity_status"])
+
+
 @logged_operation
 def _private_message_access(conn, message_id: int, user_id: int):
     row = conn.execute(
@@ -1956,6 +2003,23 @@ def init_step27_registration_schema():
 
 
 @logged_operation
+def init_password_reset_schema():
+    with db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_tokens(user_id)"
+        )
+
+
+@logged_operation
 def init_step28():
     with db() as conn:
         conn.execute("""
@@ -2235,6 +2299,7 @@ def initialize_database():
         for migration in (
             init_db,
             init_step27_registration_schema,
+            init_password_reset_schema,
             step12_init_db,
             step13_init_db,
             step14_init_db,
@@ -3318,17 +3383,26 @@ def social_people(q: str = "", authorization: Optional[str] = Header(default=Non
     with db() as conn:
         rows = conn.execute(
             """
-            SELECT *
-            FROM users
-            WHERE id<>%s
-            AND ( username ILIKE %s
-            OR full_name ILIKE %s )
-            ORDER BY full_name
+            SELECT u.*, settings.profile_visibility
+            FROM users u
+            LEFT JOIN user_settings settings ON settings.user_id=u.id
+            WHERE u.id<>%s
+            AND (u.username ILIKE %s OR u.full_name ILIKE %s)
+            AND (
+                settings.profile_visibility IS NULL
+                OR settings.profile_visibility='public'
+                OR (settings.profile_visibility='connections' AND EXISTS (
+                    SELECT 1 FROM connection_requests c WHERE c.status='ACCEPTED'
+                    AND ((c.sender_user_id=u.id AND c.receiver_user_id=%s)
+                      OR (c.receiver_user_id=u.id AND c.sender_user_id=%s))
+                ))
+            )
+            ORDER BY u.full_name
             LIMIT 100
             """,
-            (viewer["id"], term, term),
+            (viewer["id"], term, term, viewer["id"], viewer["id"]),
         ).fetchall()
-        people = [social_user(conn, r, viewer["id"]) for r in rows]
+        people = [social_user(conn, row, viewer["id"]) for row in rows]
         return {"people": people}
 
 
@@ -3382,6 +3456,11 @@ def request_connection(
             raise HTTPException(404, "User not found")
         if are_connected(conn, viewer["id"], user_id):
             return {"ok": True, "status": "ACCEPTED"}
+        settings = conn.execute(
+            "SELECT connection_requests FROM user_settings WHERE user_id=%s", (user_id,)
+        ).fetchone()
+        if settings and not settings["connection_requests"]:
+            raise HTTPException(403, "This account is not accepting connection requests")
         incoming = conn.execute(
             """
             SELECT id
@@ -4042,6 +4121,7 @@ def communication_space_presence(
             """,
             (space_id,),
         ).fetchall()
+        visibility = {row["user_id"]: _presence_visible(conn, row["user_id"]) for row in rows}
         return {
             "members": [
                 {
@@ -4050,16 +4130,12 @@ def communication_space_presence(
                     "name": r["display_name"] or r["full_name"],
                     "status": (
                         r["status"]
-                        if _communication_settings_row(conn, r["user_id"])[
-                            "online_status"
-                        ]
+                        if visibility[r["user_id"]]
                         else "offline"
                     ),
                     "last_seen": (
                         r["last_seen"]
-                        if _communication_settings_row(conn, r["user_id"])[
-                            "online_status"
-                        ]
+                        if visibility[r["user_id"]]
                         else None
                     ),
                 }
@@ -4849,7 +4925,7 @@ def communication_realtime_presence(
     with db() as conn:
         if user_id != u["id"] and (not are_connected(conn, u["id"], user_id)):
             raise HTTPException(403, "Accepted connection required")
-        visible = bool(_communication_settings_row(conn, user_id)["online_status"])
+        visible = _presence_visible(conn, user_id)
     return {
         "user_id": user_id,
         "online": bool(visible and realtime_hub.online(user_id)),
@@ -5048,6 +5124,12 @@ def set_conversation_controls(
     if payload.action not in {"mute", "unmute", "block", "unblock"}:
         raise HTTPException(400, "Invalid action")
     with db() as conn:
+        if peer_user_id == u["id"] or peer_user_id < 1:
+            raise HTTPException(422, "Choose another account")
+        if peer_user_id > 2147483647 or not conn.execute(
+            "SELECT 1 FROM users WHERE id=%s", (peer_user_id,)
+        ).fetchone():
+            raise HTTPException(404, "Account unavailable")
         conn.execute(
             'INSERT INTO conversation_controls(user_id,peer_user_id,updated_at) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING',
             (u["id"], peer_user_id, now),
@@ -7584,8 +7666,9 @@ async def communication_websocket(ws: WebSocket):
                 or not _not_blocked(conn, uid, peer_id)
             ):
                 return False
-            row = _communication_settings_row(conn, uid if typing else peer_id)
-            return bool(row["typing_indicators"] if typing else row["online_status"])
+            if typing:
+                return bool(_communication_settings_row(conn, uid)["typing_indicators"])
+            return _presence_visible(conn, peer_id)
 
     try:
         uid = await run_in_threadpool(authenticate)
@@ -7868,6 +7951,124 @@ def register(payload: RegisterRequest):
         )
     token = create_session(user_id)
     return session_response(row, token)
+
+
+def _send_password_reset_email(recipient: str, reset_url: str):
+    if not NOVEAM_SMTP_HOST or not NOVEAM_SMTP_FROM:
+        raise RuntimeError("Password reset email is not configured")
+    if bool(NOVEAM_SMTP_USERNAME) != bool(NOVEAM_SMTP_PASSWORD):
+        raise RuntimeError("SMTP credentials are incomplete")
+
+    message = EmailMessage()
+    message["Subject"] = "Reset your NOVEAM password"
+    message["From"] = NOVEAM_SMTP_FROM
+    message["To"] = recipient
+    message.set_content(
+        "We received a request to reset your NOVEAM password.\n\n"
+        f"Use this link within 30 minutes to choose a new password:\n{reset_url}\n\n"
+        "If you did not request this, you can ignore this email."
+    )
+
+    context = ssl.create_default_context()
+    if NOVEAM_SMTP_USE_SSL:
+        with smtplib.SMTP_SSL(
+            NOVEAM_SMTP_HOST, NOVEAM_SMTP_PORT, timeout=15, context=context
+        ) as server:
+            if NOVEAM_SMTP_USERNAME:
+                server.login(NOVEAM_SMTP_USERNAME, NOVEAM_SMTP_PASSWORD)
+            server.send_message(message)
+        return
+
+    with smtplib.SMTP(NOVEAM_SMTP_HOST, NOVEAM_SMTP_PORT, timeout=15) as server:
+        server.ehlo()
+        if NOVEAM_SMTP_STARTTLS:
+            server.starttls(context=context)
+            server.ehlo()
+        if NOVEAM_SMTP_USERNAME:
+            server.login(NOVEAM_SMTP_USERNAME, NOVEAM_SMTP_PASSWORD)
+        server.send_message(message)
+
+
+@app.post("/api/auth/forgot-password", status_code=status.HTTP_202_ACCEPTED)
+@logged_operation(level=logging.INFO)
+def request_password_reset(payload: ForgotPasswordRequest, request: Request):
+    email = payload.email.strip().lower()
+    email_key = hashlib.sha256(email.encode("utf-8")).hexdigest()
+    client_ip = request.client.host if request.client else "unknown"
+    _check_auth_attempt(("password_reset_email", email_key))
+    _check_auth_attempt(("password_reset_ip", client_ip))
+
+    # Do not reveal account existence when mail delivery is unavailable.
+    if not NOVEAM_SMTP_HOST or not NOVEAM_SMTP_FROM:
+        safe_log(logging.ERROR, "password_reset_email", "not_configured", status_code=503)
+        raise HTTPException(503, "Password reset is temporarily unavailable")
+
+    if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        return {"message": "If an account matches that email, reset instructions will be sent."}
+
+    with db() as conn:
+        user = conn.execute(
+            "SELECT id,email FROM users WHERE lower(email)=%s LIMIT 1", (email,)
+        ).fetchone()
+
+    if user:
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(minutes=30)
+        with db() as conn:
+            conn.execute(
+                "DELETE FROM password_reset_tokens WHERE user_id=%s OR expires_at<=%s",
+                (user["id"], now.isoformat()),
+            )
+            conn.execute(
+                "INSERT INTO password_reset_tokens(token_hash,user_id,expires_at,created_at) VALUES(%s,%s,%s,%s)",
+                (token_hash, user["id"], expires.isoformat(), now.isoformat()),
+            )
+
+        reset_url = (
+            NOVEAM_FRONTEND_BASE_URL
+            + "/reset-password.html?"
+            + urlencode({"token": raw_token})
+        )
+        try:
+            _send_password_reset_email(user["email"], reset_url)
+        except Exception:
+            with db() as conn:
+                conn.execute(
+                    "DELETE FROM password_reset_tokens WHERE token_hash=%s",
+                    (token_hash,),
+                )
+            safe_log(logging.ERROR, "password_reset_email", "delivery_failed", status_code=503)
+            raise HTTPException(503, "Password reset is temporarily unavailable") from None
+
+    return {"message": "If an account matches that email, reset instructions will be sent."}
+
+
+@app.post("/api/auth/reset-password")
+@logged_operation(level=logging.INFO)
+def reset_password(payload: ResetPasswordRequest):
+    now = datetime.now(timezone.utc).isoformat()
+    token_hash = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
+    _check_auth_attempt(("password_reset_token", token_hash))
+
+    with db() as conn:
+        reset = conn.execute(
+            "SELECT user_id FROM password_reset_tokens WHERE token_hash=%s AND expires_at>%s FOR UPDATE",
+            (token_hash, now),
+        ).fetchone()
+        if not reset:
+            raise HTTPException(400, "This password reset link is invalid or expired")
+        user_id = reset["user_id"]
+        new_hash = hash_password(payload.new_password)
+        conn.execute(
+            "UPDATE users SET password_hash=%s WHERE id=%s", (new_hash, user_id)
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id=%s", (user_id,))
+        conn.execute("DELETE FROM password_reset_tokens WHERE user_id=%s", (user_id,))
+
+    audit(user_id, "reset_password", "account:security")
+    return {"ok": True, "message": "Password updated successfully"}
 
 
 @app.post("/api/auth/login")
@@ -8155,31 +8356,69 @@ def change_password(
     return {"ok": True, "message": "Password changed successfully"}
 
 
+def serialize_user_settings(row):
+    defaults = UserSettingsPatch().model_dump()
+    if row is None:
+        return defaults
+    return {
+        key: bool(row[key]) if isinstance(default, bool) else row[key]
+        for key, default in defaults.items()
+    }
+
+
 @app.get("/api/settings/me")
 @logged_operation
-def get_user_settings(authorization: Optional[str] = Header(default=None)):
+def get_user_settings(response: Response, authorization: Optional[str] = Header(default=None)):
     user, _ = current_user(authorization)
+    response.headers["Cache-Control"] = "no-store"
     with db() as conn:
         row = conn.execute(
-            'SELECT * FROM user_settings WHERE user_id=%s', (user["id"],)
+            "SELECT * FROM user_settings WHERE user_id=%s", (user["id"],)
         ).fetchone()
-    if not row:
-        return {
-            "theme": "system",
-            "language": "en",
-            "notifications": True,
-            "profile_visibility": "connections",
-            "activity_status": True,
-            "connection_requests": True,
-        }
-    return {
-        "theme": row["theme"],
-        "language": row["language"],
-        "notifications": bool(row["notifications"]),
-        "profile_visibility": row["profile_visibility"],
-        "activity_status": bool(row["activity_status"]),
-        "connection_requests": bool(row["connection_requests"]),
-    }
+    return serialize_user_settings(row)
+
+
+@app.patch("/api/settings/me")
+@logged_operation
+def patch_user_settings(
+    payload: UserSettingsPatch, response: Response, authorization: Optional[str] = Header(default=None)
+):
+    user, _ = current_user(authorization)
+    response.headers["Cache-Control"] = "no-store"
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(422, "Select at least one setting to update")
+    # Column names come only from the strict request model. Values are bound separately.
+    columns = ", ".join(updates)
+    placeholders = ", ".join(["%s"] * len(updates))
+    assignments = ", ".join(f"{key}=excluded.{key}" for key in updates)
+    values = [int(value) if isinstance(value, bool) else value for value in updates.values()]
+    now = datetime.now(timezone.utc).isoformat()
+    with db() as conn:
+        row = conn.execute(
+            f"""
+            INSERT INTO user_settings(user_id, updated_at, {columns})
+            VALUES(%s, %s, {placeholders})
+            ON CONFLICT(user_id) DO UPDATE SET updated_at=excluded.updated_at, {assignments}
+            RETURNING *
+            """,
+            (user["id"], now, *values),
+        ).fetchone()
+    audit(user["id"], "update", "settings:self")
+    return serialize_user_settings(row)
+
+
+@app.get("/api/settings/me/blocked-accounts")
+@logged_operation
+def get_blocked_accounts(response: Response, authorization: Optional[str] = Header(default=None)):
+    user, _ = current_user(authorization)
+    response.headers["Cache-Control"] = "no-store"
+    with db() as conn:
+        return conn.execute(
+            """SELECT peer_user_id FROM conversation_controls
+               WHERE user_id=%s AND blocked=1 ORDER BY peer_user_id""",
+            (user["id"],),
+        ).fetchall()
 
 
 @app.put("/api/settings/me")
