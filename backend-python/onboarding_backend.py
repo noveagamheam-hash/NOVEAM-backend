@@ -51,6 +51,14 @@ class OnboardingCompletion(BaseModel):
     skip: bool = False
 
 
+def initial_step(profile, interests):
+    if not (profile.get('display_name') or '').strip():
+        return 0
+    if not any((profile.get(field) or '').strip() for field in ('headline', 'bio', 'location')):
+        return 1
+    return 3 if interests else 2
+
+
 def initialize_onboarding_database(db):
     with db() as conn:
         conn.execute(SCHEMA)
@@ -71,9 +79,18 @@ def install_onboarding_routes(app, db, current_user):
         )]
         profile = profile or {}
         conn.execute(
-            '''INSERT INTO user_onboarding(user_id,display_name,headline,bio,location,interests)
-               VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO NOTHING''',
-            (user['id'], profile.get('display_name') or user['full_name'],
+            '''INSERT INTO user_onboarding(user_id,step,display_name,headline,bio,location,interests)
+               VALUES(%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT(user_id) DO UPDATE SET
+                   step=excluded.step,display_name=excluded.display_name,
+                   headline=excluded.headline,bio=excluded.bio,location=excluded.location,
+                   interests=excluded.interests
+               WHERE user_onboarding.revision=0 AND user_onboarding.completed_at IS NULL
+                 AND (user_onboarding.step,user_onboarding.display_name,user_onboarding.headline,
+                      user_onboarding.bio,user_onboarding.location,user_onboarding.interests)
+                  IS DISTINCT FROM (excluded.step,excluded.display_name,excluded.headline,
+                                    excluded.bio,excluded.location,excluded.interests)''',
+            (user['id'], initial_step(profile, interests), profile.get('display_name') or user['full_name'],
              profile.get('headline', ''), profile.get('bio', ''), profile.get('location', ''),
              Jsonb(interests)),
         )
@@ -101,8 +118,10 @@ def install_onboarding_routes(app, db, current_user):
                 raise HTTPException(409, 'Onboarding is already complete. Reload this page.')
             if current['revision'] != payload.revision:
                 raise HTTPException(409, 'Progress changed in another tab. Reload to continue.')
+            if max(current['step'], payload.step) > 0 and not payload.display_name:
+                raise HTTPException(422, 'Enter a display name before continuing.')
             row = conn.execute(
-                '''UPDATE user_onboarding SET step=%s,display_name=%s,headline=%s,bio=%s,
+                '''UPDATE user_onboarding SET step=GREATEST(step,%s),display_name=%s,headline=%s,bio=%s,
                    location=%s,interests=%s,revision=revision+1,updated_at=CURRENT_TIMESTAMP
                    WHERE user_id=%s RETURNING *''',
                 (payload.step, payload.display_name, payload.headline, payload.bio,
@@ -119,11 +138,19 @@ def install_onboarding_routes(app, db, current_user):
                 return response(current)
             if current['revision'] != payload.revision:
                 raise HTTPException(409, 'Progress changed in another tab. Reload to continue.')
-            if not payload.skip:
-                name = current['display_name'].strip()
-                if not name:
-                    raise HTTPException(422, 'Enter a display name before finishing.')
-                conn.execute('UPDATE users SET full_name=%s WHERE id=%s', (name, user['id']))
+            name = current['display_name'].strip()
+            if not name or current['step'] < 1:
+                raise HTTPException(422, 'Confirm your display name before finishing.')
+            if not payload.skip and current['step'] != 3:
+                raise HTTPException(422, 'Review your introduction before finishing.')
+            conn.execute('UPDATE users SET full_name=%s WHERE id=%s', (name, user['id']))
+            if payload.skip:
+                conn.execute(
+                    '''INSERT INTO profiles(user_id,display_name) VALUES(%s,%s)
+                       ON CONFLICT(user_id) DO UPDATE SET display_name=excluded.display_name''',
+                    (user['id'], name),
+                )
+            else:
                 conn.execute(
                     '''INSERT INTO profiles(user_id,display_name,headline,bio,location)
                        VALUES(%s,%s,%s,%s,%s) ON CONFLICT(user_id) DO UPDATE SET
