@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import time
@@ -13,6 +14,9 @@ from reportlab.graphics.barcode.qr import QrCodeWidget
 from reportlab.graphics.shapes import Drawing
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
+
+
+logger = logging.getLogger("noveam.backend")
 
 
 def initialize(db):
@@ -41,9 +45,14 @@ def digest(value):
 
 
 def cipher():
+    key = os.environ.get("NOVEAM_MFA_KEY", "").strip()
+    if not key:
+        logger.error("operation=mfa_configuration outcome=key_missing")
+        raise HTTPException(503, "Authenticator service is temporarily unavailable")
     try:
-        return Fernet(os.environ.get("NOVEAM_MFA_KEY", "").encode())
+        return Fernet(key.encode())
     except (ValueError, TypeError):
+        logger.error("operation=mfa_configuration outcome=key_invalid")
         raise HTTPException(503, "Authenticator service is temporarily unavailable") from None
 
 
@@ -57,6 +66,7 @@ def decrypt(secret):
     try:
         return cipher().decrypt(secret[7:].encode()).decode()
     except InvalidToken:
+        logger.error("operation=mfa_decryption outcome=stored_secret_unreadable")
         raise HTTPException(503, "Authenticator service is temporarily unavailable") from None
 
 
