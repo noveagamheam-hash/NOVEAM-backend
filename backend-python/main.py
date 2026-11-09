@@ -27,6 +27,7 @@ import ssl
 import psycopg
 from psycopg.rows import dict_row
 import policy_safety
+import account_security
 from onboarding_backend import initialize_onboarding_database, install_onboarding_routes
 from push_backend import initialize_push_database, install_push_routes, enqueue_push, push_worker
 from psycopg import sql as pg_sql
@@ -748,6 +749,8 @@ class NoveamAnalyticsEvent(NoveamModel):
         pattern="^(google|bing|yahoo|duckduckgo|brave|other-search|social|referral|direct|unknown)$"
     )
 class LoginRequest(NoveamModel):
+    captcha_token: str = Field(default="", max_length=2048)
+    remember: bool = False
     username: str = Field(default="", max_length=254)
     identifier: str = Field(default="", max_length=254)
     password: str = Field(min_length=1, max_length=128)
@@ -768,6 +771,7 @@ class ChangePasswordRequest(NoveamModel):
 
 
 class TwoFactorCodeRequest(NoveamModel):
+    remember: bool = False
     code: str = Field(min_length=6, max_length=12)
 
 
@@ -778,7 +782,7 @@ class TwoFactorDisableRequest(NoveamModel):
 
 class TwoFactorLoginRequest(NoveamModel):
     challenge: str = Field(min_length=20, max_length=200)
-    code: str = Field(min_length=6, max_length=12)
+    code: str = Field(min_length=6, max_length=32)
 
 
 class AccountContactUpdate(NoveamModel):
@@ -1132,32 +1136,34 @@ def public_user(row):
 
 
 @logged_operation
-def create_session(user_id: int) -> str:
+def create_session(user_id: int, *, verified=False, remember=False) -> str:
     token = secrets.token_urlsafe(40)
     now = datetime.now(timezone.utc)
-    expires = now + timedelta(days=30)
+    expires = now + (timedelta(days=30 if remember else 1) if verified else timedelta(minutes=15))
     with db() as conn:
         conn.execute('DELETE FROM sessions WHERE expires_at < %s', (now.isoformat(),))
         conn.execute(
-            'INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(%s,%s,%s,%s)',
-            (token, user_id, expires.isoformat(), now.isoformat()),
+            'INSERT INTO sessions(token,user_id,expires_at,created_at,mfa_verified) VALUES(%s,%s,%s,%s,%s)',
+            (account_security.digest(token), user_id, expires.isoformat(), now.isoformat(), verified),
         )
     return token
 
 
 @logged_operation
-def authenticate_session(authorization: Optional[str], *, protected=False):
+def authenticate_session(authorization: Optional[str], *, protected=False, enrollment=False):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Authentication required")
-    token = authorization[7:].strip()
+    token = account_security.digest(authorization[7:].strip())
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
         row = conn.execute(
-            'SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=%s AND s.expires_at>%s',
+            'SELECT u.*, s.mfa_verified FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=%s AND s.expires_at>%s',
             (token, now),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=401, detail="Session expired or invalid")
+        if not enrollment and not row["mfa_verified"]:
+            raise HTTPException(403, "MFA enrollment required")
         if protected and policy_safety.ENABLED:
             policy_safety.check_access(conn, row["id"])
     return row, token
@@ -1168,7 +1174,7 @@ def current_user(authorization: Optional[str]):
 
 
 def session_response(user, token):
-    data = {"token": token, "user": public_user(user)}
+    data = {"token": token, "user": public_user(user), "policy": None}
     if policy_safety.ENABLED:
         with db() as conn:
             data["policy"] = policy_safety.policy_status(conn, user["id"])
@@ -2334,6 +2340,7 @@ def initialize_database():
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS pending_file_cleanup(stored_name TEXT PRIMARY KEY)"
             )
+        account_security.initialize(db)
         initialize_onboarding_database(db)
         if policy_safety.ENABLED:
             policy_safety.current_policy(migration_conn)
@@ -7740,7 +7747,9 @@ async def noveam_production_guard(request: Request, call_next):
                 "Cross-Origin-Opener-Policy": "same-origin",
             }
         )
-        if NOVEAM_ENV == "production" and request.url.path.startswith("/api/"):
+        if request.url.path.startswith("/api/auth/") or (
+            NOVEAM_ENV == "production" and request.url.path.startswith("/api/")
+        ):
             response.headers["Cache-Control"] = "no-store"
         if NOVEAM_REQUIRE_HTTPS and request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = (
@@ -7955,7 +7964,7 @@ def register(payload: RegisterRequest):
             status_code=409, detail="Email ID or phone number is already registered"
         )
     token = create_session(user_id)
-    return session_response(row, token)
+    return {**session_response(row, token), "requires_mfa_setup": True}
 
 
 def _send_password_reset_email(recipient: str, reset_url: str):
@@ -8070,6 +8079,8 @@ def reset_password(payload: ResetPasswordRequest):
             "UPDATE users SET password_hash=%s WHERE id=%s", (new_hash, user_id)
         )
         conn.execute("DELETE FROM sessions WHERE user_id=%s", (user_id,))
+        conn.execute("DELETE FROM pending_2fa_logins WHERE user_id=%s", (user_id,))
+        conn.execute("DELETE FROM user_2fa WHERE user_id=%s AND enabled=0", (user_id,))
         conn.execute("DELETE FROM password_reset_tokens WHERE user_id=%s", (user_id,))
 
     audit(user_id, "reset_password", "account:security")
@@ -8078,7 +8089,8 @@ def reset_password(payload: ResetPasswordRequest):
 
 @app.post("/api/auth/login")
 @logged_operation(level=logging.INFO)
-def login(payload: LoginRequest):
+def login(payload: LoginRequest, request: Request):
+    account_security.check_login_risk(db, request, payload)
     _check_auth_attempt(
         (
             "login",
@@ -8115,167 +8127,194 @@ def login(payload: LoginRequest):
             detail="Invalid email ID, phone number, username, or password",
         )
     with db() as conn:
-        two = conn.execute(
-            'SELECT enabled FROM user_2fa WHERE user_id=%s', (row["id"],)
-        ).fetchone()
-    if two and int(two["enabled"]) == 1:
-        challenge = secrets.token_urlsafe(32)
-        expires = datetime.now(timezone.utc) + timedelta(minutes=5)
-        with db() as conn:
+        locked = conn.execute("SELECT password_hash FROM users WHERE id=%s FOR UPDATE", (row["id"],)).fetchone()
+        if not locked or locked["password_hash"] != row["password_hash"]:
+            raise HTTPException(401, "Credentials changed. Please sign in again.")
+        two = conn.execute("SELECT enabled FROM user_2fa WHERE user_id=%s", (row["id"],)).fetchone()
+        if two and two["enabled"]:
+            challenge = secrets.token_urlsafe(32)
+            now = datetime.now(timezone.utc)
+            conn.execute("DELETE FROM pending_2fa_logins WHERE expires_at < %s", (now.isoformat(),))
             conn.execute(
-                'DELETE FROM pending_2fa_logins WHERE expires_at < %s',
-                (datetime.now(timezone.utc).isoformat(),),
+                "INSERT INTO pending_2fa_logins(challenge,user_id,expires_at,remember) VALUES(%s,%s,%s,%s)",
+                (account_security.digest(challenge), row["id"],
+                 (now + timedelta(minutes=5)).isoformat(), payload.remember),
             )
-            conn.execute(
-                'INSERT INTO pending_2fa_logins(challenge,user_id,expires_at) VALUES(%s,%s,%s)',
-                (challenge, row["id"], expires.isoformat()),
-            )
-        return {"requires_2fa": True, "challenge": challenge}
-    token = create_session(row["id"])
-    return session_response(row, token)
+            return {"requires_2fa": True, "challenge": challenge}
+        token = create_session(row["id"])
+    return {"token": token, "requires_mfa_setup": True}
 
 
 @app.post("/api/auth/2fa/login")
 @logged_operation(level=logging.INFO)
 def two_factor_login(payload: TwoFactorLoginRequest):
-    _check_auth_attempt(("2fa", hashlib.sha256(payload.challenge.encode()).hexdigest()))
+    challenge = account_security.digest(payload.challenge)
     now = datetime.now(timezone.utc).isoformat()
     with db() as conn:
+        pending = conn.execute(
+            "SELECT user_id FROM pending_2fa_logins WHERE challenge=%s AND expires_at>%s",
+            (challenge, now),
+        ).fetchone()
+    if not pending:
+        raise HTTPException(401, "Invalid or expired verification code")
+    account_security.limit_factor_attempts(db, pending["user_id"])
+    with db() as conn:
+        conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (pending["user_id"],))
         row = conn.execute(
             """
-            SELECT p.user_id,t.secret,t.enabled,t.last_counter
+            SELECT p.user_id,p.remember,t.secret,t.enabled,t.last_counter
             FROM pending_2fa_logins p
             JOIN user_2fa t ON t.user_id=p.user_id
             WHERE p.challenge=%s
             AND p.expires_at>%s
             FOR UPDATE OF p,t
             """,
-            (payload.challenge, now),
+            (challenge, datetime.now(timezone.utc).isoformat()),
         ).fetchone()
-        if (
-            not row
-            or not row["enabled"]
-            or (not verify_totp(row["secret"], payload.code))
-        ):
+        if not row or not row["enabled"]:
             raise HTTPException(401, "Invalid or expired verification code")
-        counter = int(datetime.now(timezone.utc).timestamp()) // 30
-        used = next(
-            (
-                counter + d
-                for d in (-1, 0, 1)
-                if hmac.compare_digest(
-                    _totp_code(
-                        row["secret"],
-                        datetime.fromtimestamp((counter + d) * 30, timezone.utc),
-                    ),
-                    "".join((ch for ch in payload.code if ch.isdigit())),
-                )
-            ),
-            None,
-        )
-        if used is None or used <= row["last_counter"]:
-            raise HTTPException(401, "Verification code has already been used")
+        if len(payload.code.strip()) == 6:
+            secret = account_security.decrypt(row["secret"])
+            used = matching_totp_counter(secret, payload.code)
+            if used is None or used <= row["last_counter"]:
+                raise HTTPException(401, "Invalid or already used verification code")
+            conn.execute(
+                "UPDATE user_2fa SET last_counter=%s,secret=%s WHERE user_id=%s",
+                (used, account_security.encrypt(secret), row["user_id"]),
+            )
+        elif not account_security.consume_recovery(conn, row["user_id"], payload.code):
+            raise HTTPException(401, "Invalid or already used recovery code")
         conn.execute(
-            'UPDATE user_2fa SET last_counter=%s WHERE user_id=%s', (used, row["user_id"])
-        )
-        conn.execute(
-            'DELETE FROM pending_2fa_logins WHERE challenge=%s', (payload.challenge,)
+            "DELETE FROM pending_2fa_logins WHERE challenge=%s",
+            (challenge,),
         )
         user = conn.execute(
             'SELECT * FROM users WHERE id=%s', (row["user_id"],)
         ).fetchone()
-        token = create_session(row["user_id"])
+        token = create_session(row["user_id"], verified=True, remember=row["remember"])
         audit(row["user_id"], "two_factor_login", "account:security")
     return session_response(user, token)
 
 
+def matching_totp_counter(secret, code):
+    code = code.strip()
+    if len(code) != 6 or not code.isascii() or not code.isdigit():
+        return None
+    counter = int(datetime.now(timezone.utc).timestamp()) // 30
+    return next((
+        step for step in (counter, counter - 1, counter + 1)
+        if hmac.compare_digest(
+            _totp_code(secret, datetime.fromtimestamp(step * 30, timezone.utc)), code
+        )
+    ), None)
+
+
 @app.get("/api/auth/2fa/status")
-@logged_operation
-def two_factor_status(authorization: Optional[str] = Header(default=None)):
-    user, _ = current_user(authorization)
+def two_factor_status(response: Response, authorization: Optional[str] = Header(default=None)):
+    user, _ = authenticate_session(authorization, enrollment=True)
     with db() as conn:
-        row = conn.execute(
-            'SELECT enabled FROM user_2fa WHERE user_id=%s', (user["id"],)
+        factor = conn.execute("SELECT enabled FROM user_2fa WHERE user_id=%s", (user["id"],)).fetchone()
+        count = conn.execute(
+            "SELECT count(*) AS remaining FROM mfa_recovery_codes WHERE user_id=%s",
+            (user["id"],),
         ).fetchone()
-    return {"enabled": bool(row and int(row["enabled"]) == 1)}
+    enabled = bool(factor and factor["enabled"])
+    if enabled and not user["mfa_verified"]:
+        raise HTTPException(401, "Sign in with your authenticator to continue")
+    response.headers["Cache-Control"] = "no-store"
+    return {"enabled": enabled, "recovery_remaining": count["remaining"],
+            "missing_steps": [] if enabled else ["authenticator"]}
 
 
 @app.post("/api/auth/2fa/setup")
-@logged_operation(level=logging.INFO)
-def two_factor_setup(authorization: Optional[str] = Header(default=None)):
-    user, _ = current_user(authorization)
-    secret = _totp_secret()
+def two_factor_setup(response: Response, authorization: Optional[str] = Header(default=None)):
     with db() as conn:
-        enabled = conn.execute(
-            'SELECT enabled FROM user_2fa WHERE user_id=%s', (user["id"],)
-        ).fetchone()
-        if enabled and enabled["enabled"]:
-            raise HTTPException(
-                409, "Disable existing two-factor authentication before resetting it"
-            )
+        user, _ = authenticate_session(authorization, enrollment=True)
+        _check_auth_attempt(("mfa-setup", user["id"]))
+        conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user["id"],))
+        authenticate_session(authorization, enrollment=True)
+        factor = conn.execute("SELECT secret,enabled FROM user_2fa WHERE user_id=%s", (user["id"],)).fetchone()
+        if factor and factor["enabled"]:
+            raise HTTPException(409, "Authenticator already enabled. Sign in with it to continue.")
+        secret = (
+            account_security.decrypt(factor["secret"])
+            if factor and factor["secret"].startswith("fernet:")
+            else _totp_secret()
+        )
         conn.execute(
             """
             INSERT INTO user_2fa(user_id,secret,enabled,created_at)
-            VALUES(%s,%s,0,%s)
-            ON CONFLICT(user_id) DO UPDATE
-            SET secret=excluded.secret,enabled=0,created_at=excluded.created_at
+            VALUES(%s,%s,0,%s) ON CONFLICT(user_id) DO UPDATE SET secret=excluded.secret
             """,
-            (user["id"], secret, datetime.now(timezone.utc).isoformat()),
+            (user["id"], account_security.encrypt(secret), datetime.now(timezone.utc).isoformat()),
         )
-    return {"secret": secret}
+    response.headers["Cache-Control"] = "no-store"
+    return {"secret": secret, "qr_code": account_security.qr_code(secret, user["username"])}
 
 
 @app.post("/api/auth/2fa/enable")
-@logged_operation(level=logging.INFO)
 def two_factor_enable(
-    payload: TwoFactorCodeRequest, authorization: Optional[str] = Header(default=None)
+    payload: TwoFactorCodeRequest, response: Response,
+    authorization: Optional[str] = Header(default=None),
 ):
-    user, _ = current_user(authorization)
+    user, _ = authenticate_session(authorization, enrollment=True)
+    account_security.limit_factor_attempts(db, user["id"])
+    with db() as conn:
+        conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user["id"],))
+        authenticate_session(authorization, enrollment=True)
+        row = conn.execute(
+            "SELECT secret,enabled FROM user_2fa WHERE user_id=%s FOR UPDATE", (user["id"],)
+        ).fetchone()
+        if not row or row["enabled"]:
+            raise HTTPException(409, "Start authenticator setup or sign in again")
+        used = matching_totp_counter(account_security.decrypt(row["secret"]), payload.code)
+        if used is None:
+            raise HTTPException(400, "Invalid verification code")
+        conn.execute("UPDATE user_2fa SET enabled=1,last_counter=%s WHERE user_id=%s", (used, user["id"]))
+        codes = account_security.replace_recovery(conn, user["id"])
+        conn.execute("DELETE FROM sessions WHERE user_id=%s", (user["id"],))
+        conn.execute("DELETE FROM pending_2fa_logins WHERE user_id=%s", (user["id"],))
+        new_token = create_session(user["id"], verified=True, remember=payload.remember)
+        audit(user["id"], "enable_2fa", "account:security")
+        result = session_response(user, new_token)
+    response.headers["Cache-Control"] = "no-store"
+    return {**result, "ok": True, "enabled": True, "recovery_codes": codes}
+
+
+@app.post("/api/auth/2fa/recovery")
+def regenerate_recovery(
+    payload: TwoFactorDisableRequest, response: Response,
+    authorization: Optional[str] = Header(default=None),
+):
+    user, _ = authenticate_session(authorization)
+    account_security.limit_factor_attempts(db, user["id"])
+    if not verify_password(payload.current_password, user["password_hash"]):
+        raise HTTPException(400, "Current password is incorrect")
     with db() as conn:
         row = conn.execute(
-            'SELECT secret FROM user_2fa WHERE user_id=%s', (user["id"],)
+            "SELECT secret,last_counter FROM user_2fa WHERE user_id=%s AND enabled=1 FOR UPDATE",
+            (user["id"],),
         ).fetchone()
-    if not row or not verify_totp(row["secret"], payload.code):
-        raise HTTPException(status_code=400, detail="Invalid verification code")
-    with db() as conn:
-        conn.execute('UPDATE user_2fa SET enabled=1 WHERE user_id=%s', (user["id"],))
-    audit(user["id"], "enable_2fa", "account:security")
-    return {"ok": True, "enabled": True}
+        used = matching_totp_counter(account_security.decrypt(row["secret"]), payload.code) if row else None
+        if used is None or used <= row["last_counter"]:
+            raise HTTPException(400, "Enter a fresh authenticator code")
+        conn.execute("UPDATE user_2fa SET last_counter=%s WHERE user_id=%s", (used, user["id"]))
+        codes = account_security.replace_recovery(conn, user["id"])
+        audit(user["id"], "replace_recovery_codes", "account:security")
+    response.headers["Cache-Control"] = "no-store"
+    return {"recovery_codes": codes}
 
 
 @app.post("/api/auth/2fa/disable")
-@logged_operation(level=logging.INFO)
-def two_factor_disable(
-    payload: TwoFactorDisableRequest,
-    authorization: Optional[str] = Header(default=None),
-):
-    user, current_token = current_user(authorization)
-    if not verify_password(payload.current_password, user["password_hash"]):
-        raise HTTPException(status_code=400, detail="Current password is incorrect")
-    with db() as conn:
-        row = conn.execute(
-            'SELECT secret,enabled FROM user_2fa WHERE user_id=%s', (user["id"],)
-        ).fetchone()
-    if (
-        not row
-        or int(row["enabled"]) != 1
-        or (not verify_totp(row["secret"], payload.code))
-    ):
-        raise HTTPException(status_code=400, detail="Invalid verification code")
-    with db() as conn:
-        conn.execute('DELETE FROM user_2fa WHERE user_id=%s', (user["id"],))
-        conn.execute(
-            'DELETE FROM sessions WHERE user_id=%s AND token<>%s',
-            (user["id"], current_token),
-        )
-    audit(user["id"], "disable_2fa", "account:security")
-    return {"ok": True, "enabled": False}
+def two_factor_disable(authorization: Optional[str] = Header(default=None)):
+    authenticate_session(authorization)
+    raise HTTPException(409, "NOVEAM requires an authenticator for every account")
 
 
 @app.post("/api/auth/logout")
 @logged_operation(level=logging.INFO)
 def logout(authorization: Optional[str] = Header(default=None)):
-    _, token = authenticate_session(authorization)
+    _, token = authenticate_session(authorization, enrollment=True)
     with db() as conn:
         conn.execute('DELETE FROM sessions WHERE token=%s', (token,))
     return {"ok": True}
@@ -8329,6 +8368,8 @@ def logout_other_sessions(authorization: Optional[str] = Header(default=None)):
 def logout_all_sessions(authorization: Optional[str] = Header(default=None)):
     user, _ = authenticate_session(authorization)
     with db() as conn:
+        conn.execute("SELECT id FROM users WHERE id=%s FOR UPDATE", (user["id"],))
+        conn.execute("DELETE FROM pending_2fa_logins WHERE user_id=%s", (user["id"],))
         cur = conn.execute('DELETE FROM sessions WHERE user_id=%s', (user["id"],))
         removed = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
     audit(user["id"], "logout_all_sessions", "account:security")
@@ -8353,6 +8394,8 @@ def change_password(
         conn.execute(
             'UPDATE users SET password_hash=%s WHERE id=%s', (new_hash, user["id"])
         )
+        conn.execute("DELETE FROM pending_2fa_logins WHERE user_id=%s", (user["id"],))
+        conn.execute("DELETE FROM user_2fa WHERE user_id=%s AND enabled=0", (user["id"],))
         conn.execute(
             'DELETE FROM sessions WHERE user_id=%s AND token<>%s',
             (user["id"], current_token),
