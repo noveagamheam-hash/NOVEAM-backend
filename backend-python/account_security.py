@@ -50,7 +50,13 @@ def cipher():
         logger.error("operation=mfa_configuration outcome=key_missing")
         raise HTTPException(503, "Authenticator service is temporarily unavailable")
     try:
-        return Fernet(key.encode())
+        # Fernet keys encode exactly 32 bytes. Accept omitted Base64 padding.
+        encoded = key.removesuffix("=")
+        if len(encoded) != 43 or not encoded.isascii() or not all(
+            char.isalnum() or char in "-_" for char in encoded
+        ):
+            raise ValueError("Invalid Fernet key format")
+        return Fernet((encoded + "=").encode("ascii"))
     except (ValueError, TypeError):
         logger.error("operation=mfa_configuration outcome=key_invalid")
         raise HTTPException(503, "Authenticator service is temporarily unavailable") from None
