@@ -2440,7 +2440,15 @@ class BodyLimitMiddleware:
 
 
 app = FastAPI(title="Noveagamheam REST API", version="1.7.0", lifespan=lifespan)
-install_onboarding_routes(app, db, current_user)
+def onboarding_user(authorization):
+    user, token = authenticate_session(authorization, enrollment=True)
+    if policy_safety.ENABLED:
+        with db() as conn:
+            policy_safety.check_access(conn, user["id"])
+    return user, token
+
+
+install_onboarding_routes(app, db, current_user, onboarding_user)
 if policy_safety.ENABLED:
     policy_safety.install_policy_safety(app, db, authenticate_session)
 # ============================================================
