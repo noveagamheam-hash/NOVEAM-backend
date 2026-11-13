@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator
 from psycopg.types.json import Jsonb
 
 SCHEMA = """
@@ -20,10 +20,22 @@ CREATE TABLE IF NOT EXISTS user_onboarding (
     completed_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE user_onboarding ADD COLUMN IF NOT EXISTS wizard_step INTEGER
+    CHECK (wizard_step BETWEEN 1 AND 6);
+ALTER TABLE user_onboarding ADD COLUMN IF NOT EXISTS preferences JSONB NOT NULL DEFAULT '{}'::jsonb;
 """
 
 
+class OnboardingPreferences(BaseModel):
+    language: str | None = Field(default=None, pattern=r"^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8}){0,2}$")
+    large_text: StrictBool | None = None
+    reduced_motion: StrictBool | None = None
+    notifications: StrictBool | None = None
+
+
 class OnboardingDraft(BaseModel):
+    wizard_step: int | None = Field(default=None, ge=1, le=6)
+    preferences: OnboardingPreferences | None = None
     revision: int = Field(ge=0)
     step: int = Field(ge=0, le=3)
     display_name: str = Field(default='', max_length=100)
@@ -64,10 +76,21 @@ def initialize_onboarding_database(db):
         conn.execute(SCHEMA)
 
 
-def install_onboarding_routes(app, db, current_user):
+def install_onboarding_routes(app, db, current_user, onboarding_user=None):
+    draft_user = onboarding_user or current_user
     router = APIRouter(prefix='/api/onboarding', tags=['onboarding'])
 
     def state(conn, user, lock=False):
+        select = 'SELECT * FROM user_onboarding WHERE user_id=%s'
+        locking = ' FOR UPDATE' if lock else ''
+        # Confirmed drafts and completed legacy rows no longer use profile seeding.
+        saved = conn.execute(
+            select + ' AND (revision > 0 OR completed_at IS NOT NULL)' + locking,
+            (user['id'],),
+        ).fetchone()
+        if saved is not None:
+            return dict(saved)
+
         # Existing profile/interests seed the first draft without modifying them.
         profile = conn.execute(
             'SELECT display_name,headline,bio,location FROM profiles WHERE user_id=%s',
@@ -95,7 +118,7 @@ def install_onboarding_routes(app, db, current_user):
              Jsonb(interests)),
         )
         row = conn.execute(
-            'SELECT * FROM user_onboarding WHERE user_id=%s' + (' FOR UPDATE' if lock else ''),
+            select + locking,
             (user['id'],),
         ).fetchone()
         return dict(row)
@@ -105,13 +128,20 @@ def install_onboarding_routes(app, db, current_user):
 
     @router.get('/me')
     def get_onboarding(authorization: Optional[str] = Header(default=None)):
-        user, _ = current_user(authorization)
+        user, _ = draft_user(authorization)
         with db() as conn:
-            return response(state(conn, user))
+            draft = response(state(conn, user))
+            if onboarding_user:
+                settings = conn.execute(
+                    'SELECT language,large_text,reduced_motion,notifications FROM user_settings WHERE user_id=%s',
+                    (user['id'],),
+                ).fetchone()
+                draft['settings'] = dict(settings) if settings else {}
+            return draft
 
     @router.patch('/me')
     def save_onboarding(payload: OnboardingDraft, authorization: Optional[str] = Header(default=None)):
-        user, _ = current_user(authorization)
+        user, _ = draft_user(authorization)
         with db() as conn:
             current = state(conn, user, lock=True)
             if current['completed_at'] is not None:
@@ -120,11 +150,16 @@ def install_onboarding_routes(app, db, current_user):
                 raise HTTPException(409, 'Progress changed in another tab. Reload to continue.')
             if max(current['step'], payload.step) > 0 and not payload.display_name:
                 raise HTTPException(422, 'Enter a display name before continuing.')
+            if payload.wizard_step is not None and payload.wizard_step >= 5:
+                current_user(authorization)
+            preferences = payload.preferences.model_dump(exclude_none=True) if payload.preferences else {}
             row = conn.execute(
-                '''UPDATE user_onboarding SET step=GREATEST(step,%s),display_name=%s,headline=%s,bio=%s,
+                '''UPDATE user_onboarding SET
+                   wizard_step=GREATEST(wizard_step,%s),preferences=preferences || %s,
+                   step=GREATEST(step,%s),display_name=%s,headline=%s,bio=%s,
                    location=%s,interests=%s,revision=revision+1,updated_at=CURRENT_TIMESTAMP
                    WHERE user_id=%s RETURNING *''',
-                (payload.step, payload.display_name, payload.headline, payload.bio,
+                (payload.wizard_step, Jsonb(preferences), payload.step, payload.display_name, payload.headline, payload.bio,
                  payload.location, Jsonb(payload.interests), user['id']),
             ).fetchone()
             return response(dict(row))
@@ -138,6 +173,8 @@ def install_onboarding_routes(app, db, current_user):
                 return response(current)
             if current['revision'] != payload.revision:
                 raise HTTPException(409, 'Progress changed in another tab. Reload to continue.')
+            if current['wizard_step'] is not None and current['wizard_step'] < 6:
+                raise HTTPException(422, 'Review your onboarding steps before finishing.')
             name = current['display_name'].strip()
             if not name or current['step'] < 1:
                 raise HTTPException(422, 'Confirm your display name before finishing.')
@@ -166,6 +203,18 @@ def install_onboarding_routes(app, db, current_user):
                             'INSERT INTO user_interests(user_id,interest,created_at) VALUES(%s,%s,%s)',
                             [(user['id'], interest, now) for interest in current['interests']],
                         )
+            preferences = OnboardingPreferences.model_validate(current['preferences']).model_dump(exclude_none=True)
+            if preferences:
+                columns = ', '.join(preferences)
+                placeholders = ', '.join(['%s'] * len(preferences))
+                assignments = ', '.join(f'{key}=excluded.{key}' for key in preferences)
+                values = [int(value) if isinstance(value, bool) else value for value in preferences.values()]
+                conn.execute(
+                    f'''INSERT INTO user_settings(user_id,updated_at,{columns})
+                        VALUES(%s,%s,{placeholders}) ON CONFLICT(user_id) DO UPDATE
+                        SET updated_at=excluded.updated_at,{assignments}''',
+                    (user['id'], datetime.now(timezone.utc).isoformat(), *values),
+                )
             row = conn.execute(
                 '''UPDATE user_onboarding SET step=3,skipped=%s,completed_at=CURRENT_TIMESTAMP,
                    updated_at=CURRENT_TIMESTAMP,revision=revision+1 WHERE user_id=%s RETURNING *''',
